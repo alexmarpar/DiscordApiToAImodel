@@ -46,7 +46,7 @@ async def on_message(message):
     if message.author == client.user:
         return
 
-    if message.content.startswith("!ai"):
+    if message.content.startswith("!crispys"):
         respuesta = generar_respuesta(message.content)
         await message.channel.send(respuesta)
 
