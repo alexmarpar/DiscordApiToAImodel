@@ -12,6 +12,8 @@ intents.message_content = True
 client = discord.Client(intents=intents)
     
 def generar_respuesta(prompt):
+    personalidad = "Eres un bot gracioso, sarcástico y un poco troll."
+
     response = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={
@@ -20,13 +22,19 @@ def generar_respuesta(prompt):
         json={
             "model": "mistralai/mistral-7b-instruct",
             "messages": [
-                {"role": "system", "content": PERSONALIDAD},
+                {"role": "system", "content": personalidad},
                 {"role": "user", "content": prompt}
             ]
         }
     )
 
-    return response.json()["choices"][0]["message"]["content"]
+    data = response.json()
+    print(data)  # 🔥 MUY IMPORTANTE (ver logs en Railway)
+
+    if "choices" not in data:
+        return f"Error de IA: {data}"
+
+    return data["choices"][0]["message"]["content"]
 
 @client.event
 async def on_ready():
