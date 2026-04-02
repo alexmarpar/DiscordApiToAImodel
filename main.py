@@ -1,28 +1,45 @@
-import os
 import discord
-import google.generativeai as genai
-from discord.ext import commands
+import requests
+import os
 
-# Configurar Gemini
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-# Modelo que queremos:
-model = genai.GenerativeModel('gemini-1.5-flash')
+TOKEN = os.getenv("DISCORD_TOKEN")
+API_KEY = os.getenv("API_KEY")
+PERSONALIDAD = os.getenv("PERSONALIDAD")
 
-# Configurar Discord
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
 
-@bot.event
+client = discord.Client(intents=intents)
+
+def generar_respuesta(prompt):
+
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {API_KEY}"
+        },
+        json={
+            "model": "openai/gpt-3.5-turbo",
+            "messages": [
+                {"role": "system", "content": PERSONALIDAD},
+                {"role": "user", "content": prompt}
+            ]
+        }
+    )
+
+    return response.json()["choices"][0]["message"]["content"]
+
+@client.event
 async def on_ready():
-    print(f'Bot listo como {bot.user}')
+    print(f"Bot conectado como {client.user}")
 
-@bot.event
+@client.event
 async def on_message(message):
-    if message.author == bot.user: return
-    if bot.user in message.mentions:
-        response = model.generate_content(message.content)
-        await message.reply(response.text)
-    await bot.process_commands(message)
+    if message.author == client.user:
+        return
 
-bot.run(os.getenv("DISCORD_TOKEN"))
+    if message.content.startswith("!ai"):
+        respuesta = generar_respuesta(message.content)
+        await message.channel.send(respuesta)
+
+client.run(TOKEN)
