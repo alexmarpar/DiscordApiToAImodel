@@ -5,7 +5,8 @@ from discord.ext import commands
 
 # Configurar Gemini
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-model = genai.GenerativeModel('gemini-1.5-flash')
+# Modelo que queremos:
+model = genai.GenerativeModel('models/gemini-1.5-flash-latest')
 
 # Configurar Discord
 intents = discord.Intents.default()
