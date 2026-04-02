@@ -11,6 +11,10 @@ intents.message_content = True
 
 client = discord.Client(intents=intents)
 
+if len(message.content) > 200:
+    await message.channel.send("Learn to resume, machine")
+    return
+    
 def generar_respuesta(prompt):
     response = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
