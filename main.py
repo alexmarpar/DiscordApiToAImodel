@@ -12,14 +12,13 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 def generar_respuesta(prompt):
-
     response = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {API_KEY}"
         },
         json={
-            "model": "openai/gpt-3.5-turbo",
+            "model": "mistralai/mistral-7b-instruct",
             "messages": [
                 {"role": "system", "content": PERSONALIDAD},
                 {"role": "user", "content": prompt}
