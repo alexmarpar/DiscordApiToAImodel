@@ -20,7 +20,7 @@ def generar_respuesta(prompt):
             "Authorization": f"Bearer {API_KEY}"
         },
         json={
-            "model": "google/lyria-3-pro-preview",
+            "model": "qwen/qwen3.6-plus:free",
             "messages": [
                 {"role": "system", "content": personalidad},
                 {"role": "user", "content": prompt}
