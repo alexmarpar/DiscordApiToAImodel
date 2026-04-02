@@ -20,7 +20,7 @@ def generar_respuesta(prompt):
             "Authorization": f"Bearer {API_KEY}"
         },
         json={
-            "model": "meta-llama/llama-3-8b-instruct",
+            "model": "google/lyria-3-pro-preview",
             "messages": [
                 {"role": "system", "content": personalidad},
                 {"role": "user", "content": prompt}
