@@ -24,7 +24,8 @@ def generar_respuesta(prompt):
             "messages": [
                 {"role": "system", "content": personalidad},
                 {"role": "user", "content": prompt}
-            ]
+            ],
+            "max_tokens": 200
         }
     )
 
