@@ -40,6 +40,9 @@ def generar_respuesta(prompt):
 @client.event
 async def on_ready():
     print(f"Bot conectado como {client.user}")
+    await client.change_presence(
+        activity=discord.Game(name="Jugando a Candy Crush")
+    )
 
 @client.event
 async def on_message(message):
