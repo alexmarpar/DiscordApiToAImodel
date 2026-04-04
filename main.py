@@ -19,7 +19,7 @@ def generar_respuesta(prompt):
             "Authorization": f"Bearer {API_KEY}"
         },
         json={
-            "model": "qwen/qwen3.6-plus:free",
+            "model": "nvidia/llama-nemotron-embed-vl-1b-v2:free",
             "messages": [
                 {"role": "system", "content": PERSONALIDAD},
                 {"role": "user", "content": prompt}
