@@ -12,7 +12,6 @@ intents.message_content = True
 client = discord.Client(intents=intents)
     
 def generar_respuesta(prompt):
-    personalidad = "Eres un bot gracioso, sarcástico y un poco troll."
 
     response = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
@@ -22,7 +21,7 @@ def generar_respuesta(prompt):
         json={
             "model": "qwen/qwen3.6-plus:free",
             "messages": [
-                {"role": "system", "content": personalidad},
+                {"role": "system", "content": PERSONALIDAD},
                 {"role": "user", "content": prompt}
             ],
             "max_tokens": 200
