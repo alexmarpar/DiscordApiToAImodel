@@ -19,7 +19,7 @@ def generar_respuesta(prompt):
             "Authorization": f"Bearer {API_KEY}"
         },
         json={
-            "model": "nvidia/llama-nemotron-embed-vl-1b-v2:free",
+            "model": "arcee-ai/trinity-large-preview:free",
             "messages": [
                 {"role": "system", "content": PERSONALIDAD},
                 {"role": "user", "content": prompt}
