@@ -17,6 +17,13 @@ TOKEN = os.getenv("YOUR_DISCORD_TOKEN")
 API_KEY = os.getenv("YOUR_API_KEY")
 PERSONALIDAD = os.getenv("YOUR_PERSONALITY")
 ```
+Alternatively, create a .env file with the following content:
+```
+TOKEN="YOUR_DISCORD_TOKEN"
+API_KEY="YOUR_API_KEY"
+PERSONALIDAD="YOUR_PERSONALITY"
+
+```
 
 ## Instructions
 1. Clone the repositorie.
