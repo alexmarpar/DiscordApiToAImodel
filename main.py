@@ -7,6 +7,7 @@ from discord.ext import commands
 from modules.ai import setup_ai
 from modules.stats import setup_stats
 from modules.economy import setup_economy
+from modules.shop import setup_shop
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
@@ -112,6 +113,7 @@ async def main():
     setup_ai(client)
     setup_stats(client)
     setup_economy(client)
+    setup_shop(client)
 
     print(
         "[MAIN] Módulos registrados correctamente",
