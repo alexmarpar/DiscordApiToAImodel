@@ -19,7 +19,7 @@ PERSONALIDAD = os.getenv("YOUR_PERSONALITY")
 ```
 Alternatively, create a .env file with the following content:
 ```
-TOKEN="YOUR_DISCORD_TOKEN"
+DISCORD_TOKEN="YOUR_DISCORD_TOKEN"
 API_KEY="YOUR_API_KEY"
 PERSONALIDAD="YOUR_PERSONALITY"
 
