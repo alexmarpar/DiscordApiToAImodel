@@ -1032,125 +1032,17 @@ async def add_voice_time(
 
     seconds = int(seconds)
 
-    if seconds <= 0:
-        return 0.0
+    if seconds < 60:
+        return Decimal("0")
 
-    await ensure_voice_activity(
-        guild_id,
-        user_id
-    )
-
-    current = iso()
-
+    # Solo minutos completos
     minutes = seconds // 60
 
-    reward = (
-        minutes *
-        VOICE_REWARD_PER_MINUTE
-    )
-
-    async with aiosqlite.connect(DB) as db:
-
-        await db.execute(
-            """
-            UPDATE voice_activity
-
-            SET
-                total_seconds =
-                    total_seconds + ?,
-
-                total_earned =
-                    total_earned + ?,
-
-                updated_at = ?
-
-            WHERE guild_id = ?
-            AND user_id = ?
-            """,
-            (
-                seconds,
-                reward,
-                current,
-                guild_id,
-                user_id
-            )
-        )
-
-        if reward > 0:
-
-            await db.execute(
-                """
-                UPDATE accounts
-
-                SET
-                    balance =
-                        balance + ?,
-
-                    updated_at = ?
-
-                WHERE guild_id = ?
-                AND user_id = ?
-                """,
-                (
-                    reward,
-                    current,
-                    guild_id,
-                    user_id
-                )
-            )
-
-            await db.execute(
-                """
-                INSERT INTO transactions (
-                    guild_id,
-                    from_user_id,
-                    to_user_id,
-                    amount,
-                    type,
-                    description,
-                    timestamp
-                )
-
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    guild_id,
-                    None,
-                    user_id,
-                    reward,
-                    "voice_activity",
-                    (
-                        f"Actividad en voz: "
-                        f"{minutes} minuto(s)"
-                    ),
-                    current
-                )
-            )
-
-        await db.commit()
-
-    return reward
-    # ========================================================
-    # SOLO MINUTOS COMPLETOS
-    # ========================================================
-
-    minutes = (
-        seconds // 60
-    )
-
-    if minutes <= 0:
-
-        return Decimal(
-            "0"
-        )
-
-    seconds_to_add = (
-        minutes * 60
-    )
+    seconds_to_process = minutes * 60
 
     reward = (
-        VOICE_REWARD_PER_MINUTE
-        * Decimal(minutes)
+        VOICE_REWARD_PER_MINUTE *
+        Decimal(minutes)
     )
 
     reward = reward.quantize(
@@ -1158,13 +1050,23 @@ async def add_voice_time(
         rounding=ROUND_DOWN
     )
 
-    async with aiosqlite.connect(
-        DB
-    ) as db:
+    current = iso()
 
-        # ====================================================
-        # ESTADÍSTICAS DE VOZ
-        # ====================================================
+    await ensure_voice_activity(
+        guild_id,
+        user_id
+    )
+
+    await ensure_account(
+        guild_id,
+        user_id
+    )
+
+    async with aiosqlite.connect(DB) as db:
+
+        # ================================================
+        # GUARDAR TIEMPO DE VOZ
+        # ================================================
 
         await db.execute(
             """
@@ -1183,7 +1085,7 @@ async def add_voice_time(
             AND user_id = ?
             """,
             (
-                seconds_to_add,
+                seconds_to_process,
                 float(reward),
                 current,
                 guild_id,
@@ -1191,70 +1093,63 @@ async def add_voice_time(
             )
         )
 
-        # ====================================================
-        # SALDO
-        # ====================================================
+        # ================================================
+        # AÑADIR DINERO AL SALDO
+        # ================================================
 
-        if reward > 0:
+        await db.execute(
+            """
+            UPDATE accounts
 
-            await db.execute(
-                """
-                UPDATE accounts
+            SET
+                balance =
+                    balance + ?,
 
-                SET
-                    balance =
-                        balance + ?,
+                updated_at = ?
 
-                    updated_at = ?
+            WHERE guild_id = ?
+            AND user_id = ?
+            """,
+            (
+                float(reward),
+                current,
+                guild_id,
+                user_id
+            )
+        )
 
-                WHERE guild_id = ?
-                AND user_id = ?
-                """,
-                (
-                    float(reward),
-                    current,
-                    guild_id,
-                    user_id
-                )
+        # ================================================
+        # REGISTRAR TRANSACCIÓN
+        # ================================================
+
+        await db.execute(
+            """
+            INSERT INTO transactions (
+                guild_id,
+                from_user_id,
+                to_user_id,
+                amount,
+                type,
+                description,
+                timestamp
             )
 
-            # =================================================
-            # TRANSACCIÓN
-            # =================================================
-
-            await db.execute(
-                """
-                INSERT INTO transactions (
-                    guild_id,
-                    from_user_id,
-                    to_user_id,
-                    amount,
-                    type,
-                    description,
-                    timestamp
-                )
-
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    guild_id,
-                    None,
-                    user_id,
-                    float(reward),
-                    "voice_activity",
-                    (
-                        f"Actividad en voz: "
-                        f"{minutes} minuto(s)"
-                    ),
-                    current
-                )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                None,
+                user_id,
+                float(reward),
+                "voice_activity",
+                f"Actividad en voz: {minutes} minuto(s)",
+                current
             )
+        )
 
         await db.commit()
 
     return reward
-
-
 # ============================================================
 # COMPROBAR ACTIVIDAD
 # ============================================================
