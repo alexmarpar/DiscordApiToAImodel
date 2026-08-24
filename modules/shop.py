@@ -571,15 +571,28 @@ async def buy_command(
 # ============================================================
 # /INVENTORY
 # ============================================================
-
 async def inventory_command(
-    interaction: discord.Interaction
+    interaction: discord.Interaction,
+    user: discord.Member = None
 ):
 
     if interaction.guild is None:
 
         await interaction.response.send_message(
             "❌ Este comando solo funciona en un servidor.",
+            ephemeral=True
+        )
+
+        return
+
+    # Si no especifica usuario, muestra el suyo
+    if user is None:
+        user = interaction.user
+
+    if user.bot:
+
+        await interaction.response.send_message(
+            "❌ Los bots no tienen inventario.",
             ephemeral=True
         )
 
@@ -605,28 +618,39 @@ async def inventory_command(
             ORDER BY s.name ASC
         """, (
             interaction.guild.id,
-            interaction.user.id
+            user.id
         ))
 
         items = await cursor.fetchall()
 
+    # --------------------------------------------------------
+    # SIN INVENTARIO
+    # --------------------------------------------------------
+
     if not items:
 
         await interaction.response.send_message(
-            "🎒 Tu inventario está vacío.",
+            f"🎒 **{user.display_name}** no tiene objetos.",
             ephemeral=True
         )
 
         return
 
+    # --------------------------------------------------------
+    # EMBED
+    # --------------------------------------------------------
+
     embed = discord.Embed(
         title="🎒 Inventario",
         description=(
-            f"Inventario de "
-            f"**{interaction.user.display_name}**"
+            f"Inventario de **{user.display_name}**"
         ),
         color=discord.Color.blue(),
         timestamp=now()
+    )
+
+    embed.set_thumbnail(
+        url=user.display_avatar.url
     )
 
     for (
@@ -641,12 +665,13 @@ async def inventory_command(
             inline=False
         )
 
-    await interaction.response.send_message(
-        embed=embed,
-        ephemeral=True
+    embed.set_footer(
+        text=f"ID: {user.id}"
     )
 
-
+    await interaction.response.send_message(
+        embed=embed
+    )
 # ============================================================
 # /SHOPINFO
 # ============================================================
@@ -689,8 +714,352 @@ async def shop_info_command(
     await interaction.response.send_message(
         embed=embed
     )
+# ============================================================
+# ADMIN CHECK
+# ============================================================
+
+def is_admin(interaction: discord.Interaction):
+
+    return (
+        interaction.guild is not None
+        and interaction.user.guild_permissions.administrator
+    )
 
 
+# ============================================================
+# /SHOP_ADD
+# ============================================================
+
+async def shop_add_command(
+    interaction: discord.Interaction,
+    name: str,
+    price: int,
+    description: str = "",
+    stock: int = -1,
+    role_id: str = ""
+):
+
+    if not is_admin(interaction):
+
+        await interaction.response.send_message(
+            "❌ Solo los administradores pueden utilizar este comando.",
+            ephemeral=True
+        )
+
+        return
+
+    if price < 0:
+
+        await interaction.response.send_message(
+            "❌ El precio no puede ser negativo.",
+            ephemeral=True
+        )
+
+        return
+
+    if stock < -1:
+
+        await interaction.response.send_message(
+            "❌ El stock debe ser `-1` o un número positivo.",
+            ephemeral=True
+        )
+
+        return
+
+    parsed_role_id = None
+
+    if role_id:
+
+        try:
+            parsed_role_id = int(role_id)
+
+        except ValueError:
+
+            await interaction.response.send_message(
+                "❌ El ID del rol no es válido.",
+                ephemeral=True
+            )
+
+            return
+
+        role = interaction.guild.get_role(
+            parsed_role_id
+        )
+
+        if role is None:
+
+            await interaction.response.send_message(
+                "❌ No existe ese rol en el servidor.",
+                ephemeral=True
+            )
+
+            return
+
+    async with aiosqlite.connect(DB) as db:
+
+        try:
+
+            await db.execute(
+                """
+                INSERT INTO shop_items (
+                    name,
+                    description,
+                    price,
+                    stock,
+                    role_id,
+                    created_at
+                )
+
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name,
+                    description,
+                    price,
+                    stock,
+                    parsed_role_id,
+                    now().isoformat()
+                )
+            )
+
+            await db.commit()
+
+        except aiosqlite.IntegrityError:
+
+            await interaction.response.send_message(
+                f"❌ Ya existe **{name}**.",
+                ephemeral=True
+            )
+
+            return
+
+    await interaction.response.send_message(
+        f"✅ Producto **{name}** creado.\n"
+        f"💰 Precio: **{format_money(price)}**"
+    )
+
+
+# ============================================================
+# /SHOP_REMOVE
+# ============================================================
+
+async def shop_remove_command(
+    interaction: discord.Interaction,
+    name: str
+):
+
+    if not is_admin(interaction):
+
+        await interaction.response.send_message(
+            "❌ Solo los administradores pueden utilizar este comando.",
+            ephemeral=True
+        )
+
+        return
+
+    async with aiosqlite.connect(DB) as db:
+
+        cursor = await db.execute(
+            """
+            SELECT id, name
+            FROM shop_items
+
+            WHERE LOWER(name) = LOWER(?)
+            """,
+            (name,)
+        )
+
+        item = await cursor.fetchone()
+
+        if item is None:
+
+            await interaction.response.send_message(
+                f"❌ No existe **{name}**.",
+                ephemeral=True
+            )
+
+            return
+
+        item_id, item_name = item
+
+        await db.execute(
+            """
+            DELETE FROM shop_items
+            WHERE id = ?
+            """,
+            (item_id,)
+        )
+
+        await db.commit()
+
+    await interaction.response.send_message(
+        f"🗑️ Producto **{item_name}** eliminado."
+    )
+
+
+# ============================================================
+# /SHOP_EDIT
+# ============================================================
+
+async def shop_edit_command(
+    interaction: discord.Interaction,
+    name: str,
+    price: int = None,
+    stock: int = None,
+    description: str = None,
+    role_id: str = None
+):
+
+    if not is_admin(interaction):
+
+        await interaction.response.send_message(
+            "❌ Solo los administradores pueden utilizar este comando.",
+            ephemeral=True
+        )
+
+        return
+
+    if price is not None and price < 0:
+
+        await interaction.response.send_message(
+            "❌ El precio no puede ser negativo.",
+            ephemeral=True
+        )
+
+        return
+
+    if stock is not None and stock < -1:
+
+        await interaction.response.send_message(
+            "❌ El stock debe ser `-1` o un número positivo.",
+            ephemeral=True
+        )
+
+        return
+
+    parsed_role_id = None
+
+    if role_id is not None:
+
+        if role_id == "":
+            parsed_role_id = None
+
+        else:
+
+            try:
+                parsed_role_id = int(role_id)
+
+            except ValueError:
+
+                await interaction.response.send_message(
+                    "❌ El ID del rol no es válido.",
+                    ephemeral=True
+                )
+
+                return
+
+            if interaction.guild.get_role(
+                parsed_role_id
+            ) is None:
+
+                await interaction.response.send_message(
+                    "❌ No existe ese rol.",
+                    ephemeral=True
+                )
+
+                return
+
+    # --------------------------------------------------------
+    # Construir UPDATE
+    # --------------------------------------------------------
+
+    updates = []
+    values = []
+
+    if price is not None:
+
+        updates.append(
+            "price = ?"
+        )
+
+        values.append(price)
+
+    if stock is not None:
+
+        updates.append(
+            "stock = ?"
+        )
+
+        values.append(stock)
+
+    if description is not None:
+
+        updates.append(
+            "description = ?"
+        )
+
+        values.append(description)
+
+    if role_id is not None:
+
+        updates.append(
+            "role_id = ?"
+        )
+
+        values.append(parsed_role_id)
+
+    if not updates:
+
+        await interaction.response.send_message(
+            "❌ No has indicado ningún cambio.",
+            ephemeral=True
+        )
+
+        return
+
+    async with aiosqlite.connect(DB) as db:
+
+        cursor = await db.execute(
+            """
+            SELECT id
+            FROM shop_items
+
+            WHERE LOWER(name) = LOWER(?)
+            """,
+            (name,)
+        )
+
+        item = await cursor.fetchone()
+
+        if item is None:
+
+            await interaction.response.send_message(
+                f"❌ No existe **{name}**.",
+                ephemeral=True
+            )
+
+            return
+
+        item_id = item[0]
+
+        values.append(item_id)
+
+        await db.execute(
+            f"""
+            UPDATE shop_items
+
+            SET {", ".join(updates)}
+
+            WHERE id = ?
+            """,
+            values
+        )
+
+        await db.commit()
+
+    await interaction.response.send_message(
+        f"✅ Producto **{name}** actualizado."
+    )
 # ============================================================
 # READY
 # ============================================================
@@ -794,15 +1163,41 @@ def setup_shop(client):
     )
 
     # ========================================================
-    # READY
+    # ADMIN COMMANDS
     # ========================================================
 
-    client.add_listener(
-        shop_on_ready,
-        "on_ready"
+    client.tree.add_command(
+        discord.app_commands.Command(
+            name="shop_add",
+            description="Crea un producto en la tienda.",
+            callback=shop_add_command,
+            default_permissions=discord.Permissions(
+                administrator=True
+            )
+        ),
+        guild=GUILD
     )
 
-    print(
-        "[SHOP] Módulo registrado correctamente",
-        flush=True
+    client.tree.add_command(
+        discord.app_commands.Command(
+            name="shop_remove",
+            description="Elimina un producto de la tienda.",
+            callback=shop_remove_command,
+            default_permissions=discord.Permissions(
+                administrator=True
+            )
+        ),
+        guild=GUILD
+    )
+
+    client.tree.add_command(
+        discord.app_commands.Command(
+            name="shop_edit",
+            description="Edita un producto de la tienda.",
+            callback=shop_edit_command,
+            default_permissions=discord.Permissions(
+                administrator=True
+            )
+        ),
+        guild=GUILD
     )
