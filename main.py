@@ -1,5 +1,7 @@
 import os
+
 import discord
+from discord.ext import commands
 
 from modules.ai import setup_ai
 from modules.stats import setup_stats
@@ -12,8 +14,11 @@ intents.message_content = True
 intents.members = True
 intents.voice_states = True
 
-client = discord.Client(intents=intents)
 
+client = commands.Bot(
+    command_prefix="!",
+    intents=intents
+)
 
 @client.event
 async def on_ready():
