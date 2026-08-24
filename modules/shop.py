@@ -1170,10 +1170,7 @@ def setup_shop(client):
         discord.app_commands.Command(
             name="shop_add",
             description="Crea un producto en la tienda.",
-            callback=shop_add_command,
-            default_permissions=discord.Permissions(
-                administrator=True
-            )
+            callback=shop_add_command
         ),
         guild=GUILD
     )
@@ -1183,21 +1180,15 @@ def setup_shop(client):
             name="shop_remove",
             description="Elimina un producto de la tienda.",
             callback=shop_remove_command,
-            default_permissions=discord.Permissions(
-                administrator=True
-            )
         ),
         guild=GUILD
     )
-
+    
     client.tree.add_command(
         discord.app_commands.Command(
             name="shop_edit",
             description="Edita un producto de la tienda.",
             callback=shop_edit_command,
-            default_permissions=discord.Permissions(
-                administrator=True
-            )
         ),
         guild=GUILD
     )
