@@ -1743,9 +1743,7 @@ async def economy_info(
     embed.add_field(
         name="🎙️ Recompensa",
         value=(
-            f"{format_money("
-                VOICE_REWARD_PER_MINUTE
-            )} / minuto"
+            f"{format_money(VOICE_REWARD_PER_MINUTE)} / minuto"
         ),
         inline=True
     )
