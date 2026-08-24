@@ -1262,3 +1262,16 @@ def setup_shop(client):
         ),
         guild=GUILD
     )
+# ========================================================
+# READY
+# ========================================================
+
+    client.add_listener(
+        shop_on_ready,
+        "on_ready"
+    )
+
+    print(
+        "[SHOP] Módulo registrado correctamente",
+        flush=True
+    )
