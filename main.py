@@ -113,7 +113,7 @@ async def main():
     setup_ai(client)
     setup_stats(client)
     setup_economy(client)
-    setup_shop(client)
+    await setup_shop(client)
 
     print(
         "[MAIN] Módulos registrados correctamente",
