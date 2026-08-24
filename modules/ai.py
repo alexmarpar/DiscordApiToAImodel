@@ -13,7 +13,7 @@ def generar_respuesta(prompt):
             "Authorization": f"Bearer {API_KEY}"
         },
         json={
-            "model": "arcee-ai/trinity-large-preview:free",
+            "model": "openrouter/free",
             "messages": [
                 {
                     "role": "system",

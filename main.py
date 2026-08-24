@@ -5,7 +5,7 @@ from discord.ext import commands
 
 from modules.ai import setup_ai
 from modules.stats import setup_stats
-
+from modules.economy import setup_economy
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -32,6 +32,7 @@ async def on_ready():
 async def main():
     setup_ai(client)
     setup_stats(client)
+    setup_economy(client)
 
     await client.start(TOKEN)
 
