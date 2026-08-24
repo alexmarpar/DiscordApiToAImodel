@@ -90,7 +90,7 @@ VOICE_ACTIVITY_INTERVAL = int(
 VOICE_REQUIRE_OTHERS = (
     os.getenv(
         "VOICE_REQUIRE_OTHERS",
-        "true"
+        "false"
     ).lower()
     in (
         "1",
