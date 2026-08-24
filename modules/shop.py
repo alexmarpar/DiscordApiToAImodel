@@ -169,10 +169,149 @@ async def shop_command(
         flush=True
     )
 
-    await interaction.response.send_message(
-        "🛒 La tienda funciona correctamente."
-    )
+    if interaction.guild is None:
 
+        await interaction.response.send_message(
+            "❌ Este comando solo funciona en un servidor.",
+            ephemeral=True
+        )
+
+        return
+
+    try:
+
+        async with aiosqlite.connect(DB) as db:
+
+            cursor = await db.execute("""
+                SELECT
+                    id,
+                    name,
+                    description,
+                    price,
+                    stock,
+                    role_id
+
+                FROM shop_items
+
+                ORDER BY price ASC
+            """)
+
+            items = await cursor.fetchall()
+
+        print(
+            f"[SHOP] Productos encontrados: {len(items)}",
+            flush=True
+        )
+
+        # ----------------------------------------------------
+        # TIENDA VACÍA
+        # ----------------------------------------------------
+
+        if not items:
+
+            await interaction.response.send_message(
+                "🛒 La tienda está vacía.",
+                ephemeral=True
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # EMBED
+        # ----------------------------------------------------
+
+        embed = discord.Embed(
+            title="🛒 Tienda",
+            description=(
+                "Compra productos utilizando tus "
+                "monedas."
+            ),
+            color=discord.Color.gold(),
+            timestamp=now()
+        )
+
+        for (
+            item_id,
+            name,
+            description,
+            price,
+            stock,
+            role_id
+        ) in items:
+
+            if stock == -1:
+
+                stock_text = "♾️ Ilimitado"
+
+            elif stock <= 0:
+
+                stock_text = "❌ Agotado"
+
+            else:
+
+                stock_text = (
+                    f"📦 {stock} disponibles"
+                )
+
+            role_text = ""
+
+            if role_id:
+
+                role = interaction.guild.get_role(
+                    role_id
+                )
+
+                if role:
+
+                    role_text = (
+                        f"\n🎭 Rol: {role.mention}"
+                    )
+
+            embed.add_field(
+                name=(
+                    f"📦 {name} — "
+                    f"{format_money(price)}"
+                ),
+                value=(
+                    f"{description or 'Sin descripción'}\n"
+                    f"{stock_text}"
+                    f"{role_text}"
+                    f"\n\n"
+                    f"Comprar: `/buy {name}`"
+                ),
+                inline=False
+            )
+
+        embed.set_footer(
+            text=(
+                f"Tienda de "
+                f"{interaction.guild.name}"
+            )
+        )
+
+        await interaction.response.send_message(
+            embed=embed
+        )
+
+        print(
+            "[SHOP] /shop respondido correctamente",
+            flush=True
+        )
+
+    except Exception as e:
+
+        print(
+            f"[SHOP] ERROR en /shop: "
+            f"{type(e).__name__}: {e}",
+            flush=True
+        )
+
+        if not interaction.response.is_done():
+
+            await interaction.response.send_message(
+                "❌ Ha ocurrido un error al cargar la tienda.",
+                ephemeral=True
+            )
 # ============================================================
 # /BUY
 # ============================================================
