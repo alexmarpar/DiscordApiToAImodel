@@ -730,6 +730,7 @@ def is_admin(interaction: discord.Interaction):
 # /SHOP_ADD
 # ============================================================
 
+@discord.app_commands.default_permissions(administrator=True)
 async def shop_add_command(
     interaction: discord.Interaction,
     name: str,
@@ -740,12 +741,10 @@ async def shop_add_command(
 ):
 
     if not is_admin(interaction):
-
         await interaction.response.send_message(
             "❌ Solo los administradores pueden utilizar este comando.",
             ephemeral=True
         )
-
         return
 
     if price < 0:
@@ -843,18 +842,17 @@ async def shop_add_command(
 # /SHOP_REMOVE
 # ============================================================
 
+@discord.app_commands.default_permissions(administrator=True)
 async def shop_remove_command(
     interaction: discord.Interaction,
     name: str
 ):
 
     if not is_admin(interaction):
-
         await interaction.response.send_message(
             "❌ Solo los administradores pueden utilizar este comando.",
             ephemeral=True
         )
-
         return
 
     async with aiosqlite.connect(DB) as db:
@@ -901,6 +899,7 @@ async def shop_remove_command(
 # /SHOP_EDIT
 # ============================================================
 
+@discord.app_commands.default_permissions(administrator=True)
 async def shop_edit_command(
     interaction: discord.Interaction,
     name: str,
@@ -1183,7 +1182,7 @@ def setup_shop(client):
         ),
         guild=GUILD
     )
-    
+
     client.tree.add_command(
         discord.app_commands.Command(
             name="shop_edit",
