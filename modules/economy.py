@@ -1,6 +1,7 @@
 import os
 import asyncio
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 
 import aiosqlite
 import discord
@@ -51,7 +52,7 @@ CURRENCY_SYMBOL = os.getenv(
 # SALDO INICIAL
 # ============================================================
 
-STARTING_BALANCE = int(
+STARTING_BALANCE = Decimal(
     os.getenv(
         "STARTING_BALANCE",
         "0"
@@ -63,12 +64,21 @@ STARTING_BALANCE = int(
 # ACTIVIDAD DE VOZ
 # ============================================================
 
-VOICE_REWARD_PER_MINUTE = float(
-    os.getenv(
-        "VOICE_REWARD_PER_MINUTE",
+try:
+
+    VOICE_REWARD_PER_MINUTE = Decimal(
+        os.getenv(
+            "VOICE_REWARD_PER_MINUTE",
+            "0.02"
+        )
+    )
+
+except InvalidOperation:
+
+    VOICE_REWARD_PER_MINUTE = Decimal(
         "0.02"
     )
-)
+
 
 VOICE_ACTIVITY_INTERVAL = int(
     os.getenv(
@@ -120,6 +130,7 @@ _voice_task = None
 # ============================================================
 
 def now():
+
     return datetime.now(
         timezone.utc
     )
@@ -149,11 +160,43 @@ def parse_time(value):
         return None
 
 
+def decimal_value(value):
+
+    try:
+
+        return Decimal(
+            str(value)
+        )
+
+    except (
+        InvalidOperation,
+        ValueError,
+        TypeError
+    ):
+
+        return Decimal(
+            "0"
+        )
+
+
+def money_decimal(value):
+
+    return decimal_value(
+        value
+    ).quantize(
+        Decimal("0.01")
+    )
+
+
 def format_money(amount):
+
+    amount = money_decimal(
+        amount
+    )
 
     return (
         f"{CURRENCY_SYMBOL} "
-        f"{amount:,}"
+        f"{amount:,.2f}"
     )
 
 
@@ -182,26 +225,32 @@ def format_duration(seconds):
     parts = []
 
     if days:
+
         parts.append(
             f"{days}d"
         )
 
     if hours:
+
         parts.append(
             f"{hours}h"
         )
 
     if minutes:
+
         parts.append(
             f"{minutes}m"
         )
 
     if seconds or not parts:
+
         parts.append(
             f"{seconds}s"
         )
 
-    return " ".join(parts)
+    return " ".join(
+        parts
+    )
 
 
 # ============================================================
@@ -263,7 +312,7 @@ async def init_db():
                 guild_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
 
-                balance INTEGER NOT NULL DEFAULT 0,
+                balance REAL NOT NULL DEFAULT 0,
 
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -288,7 +337,7 @@ async def init_db():
                 from_user_id INTEGER,
                 to_user_id INTEGER,
 
-                amount INTEGER NOT NULL,
+                amount REAL NOT NULL,
 
                 type TEXT NOT NULL,
 
@@ -309,7 +358,7 @@ async def init_db():
 
                 total_seconds INTEGER NOT NULL DEFAULT 0,
 
-                total_earned INTEGER NOT NULL DEFAULT 0,
+                total_earned REAL NOT NULL DEFAULT 0,
 
                 updated_at TEXT NOT NULL,
 
@@ -419,7 +468,9 @@ async def ensure_account(
 
     if existing:
 
-        return existing[0]
+        return decimal_value(
+            existing[0]
+        )
 
     await db_execute(
         """
@@ -436,7 +487,9 @@ async def ensure_account(
         (
             guild_id,
             user_id,
-            STARTING_BALANCE,
+            float(
+                STARTING_BALANCE
+            ),
             current,
             current
         )
@@ -462,7 +515,9 @@ async def ensure_account(
                 guild_id,
                 None,
                 user_id,
-                STARTING_BALANCE,
+                float(
+                    STARTING_BALANCE
+                ),
                 "initial",
                 "Saldo inicial",
                 current
@@ -500,9 +555,13 @@ async def get_balance(
 
     if not result:
 
-        return 0
+        return Decimal(
+            "0"
+        )
 
-    return result[0]
+    return decimal_value(
+        result[0]
+    )
 
 
 # ============================================================
@@ -517,7 +576,9 @@ async def add_money(
     description=None
 ):
 
-    amount = int(amount)
+    amount = money_decimal(
+        amount
+    )
 
     if amount <= 0:
 
@@ -542,7 +603,7 @@ async def add_money(
         AND user_id = ?
         """,
         (
-            amount,
+            float(amount),
             current,
             guild_id,
             user_id
@@ -567,7 +628,7 @@ async def add_money(
             guild_id,
             None,
             user_id,
-            amount,
+            float(amount),
             transaction_type,
             description,
             current
@@ -589,7 +650,9 @@ async def remove_money(
     description=None
 ):
 
-    amount = int(amount)
+    amount = money_decimal(
+        amount
+    )
 
     if amount <= 0:
 
@@ -618,7 +681,7 @@ async def remove_money(
         AND user_id = ?
         """,
         (
-            amount,
+            float(amount),
             current,
             guild_id,
             user_id
@@ -643,7 +706,7 @@ async def remove_money(
             guild_id,
             user_id,
             None,
-            amount,
+            float(amount),
             transaction_type,
             description,
             current
@@ -664,7 +727,9 @@ async def transfer_money(
     amount
 ):
 
-    amount = int(amount)
+    amount = money_decimal(
+        amount
+    )
 
     if amount <= 0:
 
@@ -715,7 +780,7 @@ async def transfer_money(
             AND user_id = ?
             """,
             (
-                amount,
+                float(amount),
                 current,
                 guild_id,
                 from_user_id
@@ -734,7 +799,7 @@ async def transfer_money(
             AND user_id = ?
             """,
             (
-                amount,
+                float(amount),
                 current,
                 guild_id,
                 to_user_id
@@ -759,7 +824,7 @@ async def transfer_money(
                 guild_id,
                 from_user_id,
                 to_user_id,
-                amount,
+                float(amount),
                 "transfer",
                 "Transferencia entre usuarios",
                 current
@@ -842,6 +907,7 @@ async def start_voice_session(
     existing = await db_execute(
         """
         SELECT user_id
+
         FROM voice_sessions
 
         WHERE guild_id = ?
@@ -911,24 +977,40 @@ async def stop_voice_session(
 
         return
 
-    joined_at = parse_time(
-        session[0]
+    # ========================================================
+    # IMPORTANTE:
+    # Calculamos desde last_paid_at, NO desde joined_at.
+    #
+    # Esto evita pagar dos veces el tiempo que ya procesó
+    # el loop.
+    # ========================================================
+
+    last_paid_at = parse_time(
+        session[1]
     )
 
-    if joined_at:
+    if last_paid_at:
 
         elapsed = int(
             (
-                now() - joined_at
+                now() - last_paid_at
             ).total_seconds()
         )
 
-        if elapsed > 0:
+        complete_minutes = (
+            elapsed // 60
+        )
+
+        if complete_minutes > 0:
+
+            seconds_to_process = (
+                complete_minutes * 60
+            )
 
             await add_voice_time(
                 guild_id,
                 user_id,
-                elapsed
+                seconds_to_process
             )
 
     await db_execute(
@@ -957,11 +1039,15 @@ async def add_voice_time(
     seconds
 ):
 
-    seconds = int(seconds)
+    seconds = int(
+        seconds
+    )
 
     if seconds <= 0:
 
-        return 0
+        return Decimal(
+            "0"
+        )
 
     await ensure_voice_activity(
         guild_id,
@@ -970,19 +1056,41 @@ async def add_voice_time(
 
     current = iso()
 
-    # Solo se pagan minutos completos.
+    # ========================================================
+    # SOLO MINUTOS COMPLETOS
+    # ========================================================
+
     minutes = (
         seconds // 60
     )
 
+    if minutes <= 0:
+
+        return Decimal(
+            "0"
+        )
+
+    seconds_to_add = (
+        minutes * 60
+    )
+
     reward = (
-        minutes *
         VOICE_REWARD_PER_MINUTE
+        * Decimal(minutes)
+    )
+
+    reward = reward.quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN
     )
 
     async with aiosqlite.connect(
         DB
     ) as db:
+
+        # ====================================================
+        # ESTADÍSTICAS DE VOZ
+        # ====================================================
 
         await db.execute(
             """
@@ -1001,13 +1109,17 @@ async def add_voice_time(
             AND user_id = ?
             """,
             (
-                seconds,
-                reward,
+                seconds_to_add,
+                float(reward),
                 current,
                 guild_id,
                 user_id
             )
         )
+
+        # ====================================================
+        # SALDO
+        # ====================================================
 
         if reward > 0:
 
@@ -1025,12 +1137,16 @@ async def add_voice_time(
                 AND user_id = ?
                 """,
                 (
-                    reward,
+                    float(reward),
                     current,
                     guild_id,
                     user_id
                 )
             )
+
+            # =================================================
+            # TRANSACCIÓN
+            # =================================================
 
             await db.execute(
                 """
@@ -1050,7 +1166,7 @@ async def add_voice_time(
                     guild_id,
                     None,
                     user_id,
-                    reward,
+                    float(reward),
                     "voice_activity",
                     (
                         f"Actividad en voz: "
@@ -1064,6 +1180,10 @@ async def add_voice_time(
 
     return reward
 
+
+# ============================================================
+# COMPROBAR ACTIVIDAD
+# ============================================================
 
 def user_counts_for_voice(
     member: discord.Member
@@ -1085,6 +1205,10 @@ def user_counts_for_voice(
 
         return False
 
+    # ========================================================
+    # AFK
+    # ========================================================
+
     if (
         VOICE_IGNORE_AFK
         and member.guild.afk_channel
@@ -1094,12 +1218,20 @@ def user_counts_for_voice(
 
         return False
 
+    # ========================================================
+    # DEAFEN
+    # ========================================================
+
     if (
         voice_state.deaf
         or voice_state.self_deaf
     ):
 
         return False
+
+    # ========================================================
+    # OTRAS PERSONAS
+    # ========================================================
 
     if VOICE_REQUIRE_OTHERS:
 
@@ -1115,6 +1247,10 @@ def user_counts_for_voice(
 
     return True
 
+
+# ============================================================
+# PROCESAR SESIONES
+# ============================================================
 
 async def process_voice_sessions():
 
@@ -1150,19 +1286,24 @@ async def process_voice_sessions():
 
         return
 
-    for user_id, last_paid_at_value in rows:
+    for (
+        user_id,
+        last_paid_at_value
+    ) in rows:
 
         member = guild.get_member(
             user_id
         )
 
-        # ----------------------------------------------------
-        # Ya no está en voz
-        # ----------------------------------------------------
+        # ====================================================
+        # YA NO CUENTA
+        # ====================================================
 
         if (
             member is None
-            or not user_counts_for_voice(member)
+            or not user_counts_for_voice(
+                member
+            )
         ):
 
             await stop_voice_session(
@@ -1172,9 +1313,9 @@ async def process_voice_sessions():
 
             continue
 
-        # ----------------------------------------------------
-        # Sigue en voz
-        # ----------------------------------------------------
+        # ====================================================
+        # SIGUE ACTIVO
+        # ====================================================
 
         last_paid_at = parse_time(
             last_paid_at_value
@@ -1210,6 +1351,10 @@ async def process_voice_sessions():
             seconds_to_process
         )
 
+        # ====================================================
+        # AVANZAR last_paid_at SOLO EL TIEMPO PAGADO
+        # ====================================================
+
         new_last_paid = (
             last_paid_at.timestamp()
             + seconds_to_process
@@ -1232,7 +1377,9 @@ async def process_voice_sessions():
             AND user_id = ?
             """,
             (
-                iso(new_last_paid_dt),
+                iso(
+                    new_last_paid_dt
+                ),
                 GUILD_ID,
                 user_id
             )
@@ -1243,11 +1390,15 @@ async def process_voice_sessions():
             print(
                 f"[ECONOMY][VOICE] "
                 f"{user_id}: "
-                f"+{reward} {CURRENCY_SYMBOL} "
+                f"+{format_money(reward)} "
                 f"({complete_minutes} min)",
                 flush=True
             )
 
+
+# ============================================================
+# LOOP DE VOZ
+# ============================================================
 
 async def voice_activity_loop():
 
@@ -1257,7 +1408,9 @@ async def voice_activity_loop():
         flush=True
     )
 
-    await asyncio.sleep(10)
+    await asyncio.sleep(
+        10
+    )
 
     while True:
 
@@ -1374,7 +1527,7 @@ async def economy_on_voice_state_update(
         return
 
     # ========================================================
-    # CAMBIO DE MUTE / DEAF
+    # MUTE / DEAF / CAMBIO DE CONDICIÓN
     # ========================================================
 
     if is_in_voice:
@@ -1392,14 +1545,20 @@ async def economy_on_voice_state_update(
             )
         )
 
-        if not valid_before and valid_after:
+        if (
+            not valid_before
+            and valid_after
+        ):
 
             await start_voice_session(
                 member.guild.id,
                 member.id
             )
 
-        elif valid_before and not valid_after:
+        elif (
+            valid_before
+            and not valid_after
+        ):
 
             await stop_voice_session(
                 member.guild.id,
@@ -1464,13 +1623,16 @@ async def economy_balance(
     if voice_stats:
 
         total_seconds = voice_stats[0]
-
-        total_earned = voice_stats[1]
+        total_earned = decimal_value(
+            voice_stats[1]
+        )
 
     else:
 
         total_seconds = 0
-        total_earned = 0
+        total_earned = Decimal(
+            "0"
+        )
 
     embed = discord.Embed(
         title="💰 Saldo",
@@ -1485,7 +1647,9 @@ async def economy_balance(
 
     embed.add_field(
         name=f"{CURRENCY_SYMBOL} Saldo",
-        value=format_money(balance),
+        value=format_money(
+            balance
+        ),
         inline=False
     )
 
@@ -1506,7 +1670,10 @@ async def economy_balance(
     )
 
     embed.set_footer(
-        text=f"Economía de {interaction.guild.name}"
+        text=(
+            f"Economía de "
+            f"{interaction.guild.name}"
+        )
     )
 
     await interaction.response.send_message(
@@ -1837,6 +2004,7 @@ async def economy_on_ready():
                     existing = await db_execute(
                         """
                         SELECT user_id
+
                         FROM voice_sessions
 
                         WHERE guild_id = ?
@@ -1851,10 +2019,8 @@ async def economy_on_ready():
 
                     if existing:
 
-                        # El bot pudo estar apagado.
-                        # Empezamos a contar desde ahora
-                        # para no regalar tiempo durante
-                        # el periodo en que estuvo apagado.
+                        # El bot estuvo apagado.
+                        # No regalamos ese tiempo.
 
                         await db_execute(
                             """
