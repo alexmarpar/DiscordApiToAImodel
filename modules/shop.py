@@ -160,6 +160,19 @@ async def init_db():
 # ============================================================
 # /SHOP
 # ============================================================
+async def shop_command(
+    interaction: discord.Interaction
+):
+
+    print(
+        "[SHOP] /shop ejecutado",
+        flush=True
+    )
+
+    await interaction.response.send_message(
+        "🛒 La tienda funciona correctamente."
+    )
+"""
 
 async def shop_command(
     interaction: discord.Interaction
@@ -240,7 +253,7 @@ async def shop_command(
         embed=embed
     )
 
-
+"""
 # ============================================================
 # /BUY
 # ============================================================
