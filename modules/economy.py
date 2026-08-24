@@ -1,5 +1,6 @@
 import os
-from datetime import datetime, timezone, timedelta
+import random
+from datetime import datetime, timezone
 
 import aiosqlite
 import discord
@@ -10,38 +11,62 @@ import discord
 # ============================================================
 
 DB = os.getenv("ECONOMY_DB", "economy.db")
+
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
-SERVER_SYMBOL = os.getenv("SERVER_SYMBOL")
+
 if GUILD_ID == 0:
     raise RuntimeError("GUILD_ID no está definido")
 
 GUILD = discord.Object(id=GUILD_ID)
 
-# Moneda
-CURRENCY = os.getenv(f"CURRENCY_NAME", {SERVER_SYMBOL})
-CURRENCY_SYMBOL = os.getenv("CURRENCY_SYMBOL", "symbol")
 
-# Saldo inicial
+# ============================================================
+# MONEDA
+# ============================================================
+
+CURRENCY = os.getenv(
+    "CURRENCY_NAME",
+    "Coins"
+)
+
+CURRENCY_SYMBOL = os.getenv(
+    "CURRENCY_SYMBOL",
+    "🪙"
+)
+
+
+# ============================================================
+# SALDO INICIAL
+# ============================================================
+
 STARTING_BALANCE = int(
     os.getenv("STARTING_BALANCE", "0")
 )
 
-# Recompensas
+
+# ============================================================
+# RECOMPENSAS
+# ============================================================
+
 DAILY_REWARD = int(
     os.getenv("DAILY_REWARD", "10")
 )
 
-WORK_MIN = float(
-    os.getenv("WORK_MIN", "0.1")
+WORK_MIN = int(
+    os.getenv("WORK_MIN", "1")
 )
 
-WORK_MAX = float(
-    os.getenv("WORK_MAX", "1")
+WORK_MAX = int(
+    os.getenv("WORK_MAX", "10")
 )
 
-# Cooldowns
-DAILY_COOLDOWN = 86400       # 24 horas
-WORK_COOLDOWN = 3600         # 1 hora
+
+# ============================================================
+# COOLDOWNS
+# ============================================================
+
+DAILY_COOLDOWN = 86400
+WORK_COOLDOWN = 86400
 
 
 # ============================================================
@@ -61,6 +86,7 @@ def now():
 
 
 def iso(dt=None):
+
     if dt is None:
         dt = now()
 
@@ -80,6 +106,7 @@ def parse_time(value):
 
 
 def format_money(amount):
+
     return f"{CURRENCY_SYMBOL} {amount:,}"
 
 
@@ -107,6 +134,10 @@ def format_duration(seconds):
 
     return " ".join(parts)
 
+
+# ============================================================
+# DATABASE
+# ============================================================
 
 async def db_execute(
     query,
@@ -136,7 +167,7 @@ async def db_execute(
 
 
 # ============================================================
-# DATABASE
+# INIT DATABASE
 # ============================================================
 
 async def init_db():
@@ -147,10 +178,6 @@ async def init_db():
     )
 
     async with aiosqlite.connect(DB) as db:
-
-        # ----------------------------------------------------
-        # CUENTAS
-        # ----------------------------------------------------
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS accounts (
@@ -172,10 +199,6 @@ async def init_db():
             )
         """)
 
-        # ----------------------------------------------------
-        # TRANSACCIONES
-        # ----------------------------------------------------
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,10 +218,6 @@ async def init_db():
             )
         """)
 
-        # ----------------------------------------------------
-        # ÍNDICES
-        # ----------------------------------------------------
-
         await db.execute("""
             CREATE INDEX IF NOT EXISTS
             idx_accounts_guild_balance
@@ -213,9 +232,7 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS
             idx_transactions_guild
 
-            ON transactions(
-                guild_id
-            )
+            ON transactions(guild_id)
         """)
 
         await db.execute("""
@@ -282,30 +299,31 @@ async def ensure_account(guild_id, user_id):
         )
     )
 
-    # Registrar el dinero inicial
-    await db_execute(
-        """
-        INSERT INTO transactions (
-            guild_id,
-            from_user_id,
-            to_user_id,
-            amount,
-            type,
-            description,
-            timestamp
+    if STARTING_BALANCE > 0:
+
+        await db_execute(
+            """
+            INSERT INTO transactions (
+                guild_id,
+                from_user_id,
+                to_user_id,
+                amount,
+                type,
+                description,
+                timestamp
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                None,
+                user_id,
+                STARTING_BALANCE,
+                "initial",
+                "Saldo inicial",
+                current
+            )
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            guild_id,
-            None,
-            user_id,
-            STARTING_BALANCE,
-            "initial",
-            "Saldo inicial",
-            current
-        )
-    )
 
     return STARTING_BALANCE
 
@@ -337,6 +355,10 @@ async def get_balance(guild_id, user_id):
     return result[0]
 
 
+# ============================================================
+# ADD MONEY
+# ============================================================
+
 async def add_money(
     guild_id,
     user_id,
@@ -344,6 +366,8 @@ async def add_money(
     transaction_type="reward",
     description=None
 ):
+
+    amount = int(amount)
 
     if amount <= 0:
         return False
@@ -399,6 +423,10 @@ async def add_money(
     return True
 
 
+# ============================================================
+# REMOVE MONEY
+# ============================================================
+
 async def remove_money(
     guild_id,
     user_id,
@@ -406,6 +434,8 @@ async def remove_money(
     transaction_type="remove",
     description=None
 ):
+
+    amount = int(amount)
 
     if amount <= 0:
         return False
@@ -465,7 +495,7 @@ async def remove_money(
 
 
 # ============================================================
-# TRANSFERENCIA
+# TRANSFER
 # ============================================================
 
 async def transfer_money(
@@ -474,6 +504,8 @@ async def transfer_money(
     to_user_id,
     amount
 ):
+
+    amount = int(amount)
 
     if amount <= 0:
         return False, "La cantidad debe ser mayor que 0."
@@ -609,6 +641,8 @@ async def set_cooldown(
     ):
         return
 
+    current = iso()
+
     await db_execute(
         f"""
         UPDATE accounts
@@ -619,15 +653,18 @@ async def set_cooldown(
         AND user_id = ?
         """,
         (
-            iso(),
-            iso(),
+            current,
+            current,
             guild_id,
             user_id
         )
     )
 
 
-def remaining_cooldown(last_use, cooldown):
+def remaining_cooldown(
+    last_use,
+    cooldown
+):
 
     if not last_use:
         return 0
@@ -781,7 +818,8 @@ async def economy_daily(
     embed = discord.Embed(
         title="🎁 Recompensa diaria",
         description=(
-            f"Has recibido **{format_money(DAILY_REWARD)}**."
+            f"Has recibido "
+            f"**{format_money(DAILY_REWARD)}**."
         ),
         color=discord.Color.green(),
         timestamp=now()
@@ -858,8 +896,6 @@ async def economy_work(
         )
 
         return
-
-    import random
 
     reward = random.randint(
         WORK_MIN,
@@ -1110,9 +1146,7 @@ async def economy_info(
 
     embed = discord.Embed(
         title="🪙 Economía",
-        description=(
-            "Sistema económico del servidor."
-        ),
+        description="Sistema económico del servidor.",
         color=discord.Color.gold()
     )
 
@@ -1138,13 +1172,13 @@ async def economy_info(
     )
 
     embed.add_field(
-        name="⏱️ Cooldown Daily",
+        name="⏱️ Daily",
         value=format_duration(DAILY_COOLDOWN),
         inline=True
     )
 
     embed.add_field(
-        name="⏱️ Cooldown Work",
+        name="⏱️ Work",
         value=format_duration(WORK_COOLDOWN),
         inline=True
     )
@@ -1210,16 +1244,17 @@ def setup_economy(client):
         flush=True
     )
 
-    # --------------------------------------------------------
-    # COMANDOS SLASH
-    # --------------------------------------------------------
+    # ========================================================
+    # TODOS LOS COMANDOS SE REGISTRAN EN EL GUILD
+    # ========================================================
 
     client.tree.add_command(
         discord.app_commands.Command(
             name="balance",
             description="Muestra el saldo de un usuario",
             callback=economy_balance
-        )
+        ),
+        guild=GUILD
     )
 
     client.tree.add_command(
@@ -1227,7 +1262,8 @@ def setup_economy(client):
             name="daily",
             description="Recoge tu recompensa diaria",
             callback=economy_daily
-        )
+        ),
+        guild=GUILD
     )
 
     client.tree.add_command(
@@ -1235,7 +1271,8 @@ def setup_economy(client):
             name="work",
             description="Trabaja para ganar monedas",
             callback=economy_work
-        )
+        ),
+        guild=GUILD
     )
 
     client.tree.add_command(
@@ -1243,7 +1280,8 @@ def setup_economy(client):
             name="pay",
             description="Envía monedas a otro usuario",
             callback=economy_pay
-        )
+        ),
+        guild=GUILD
     )
 
     client.tree.add_command(
@@ -1251,7 +1289,8 @@ def setup_economy(client):
             name="leaderboard",
             description="Muestra el ranking económico",
             callback=economy_leaderboard
-        )
+        ),
+        guild=GUILD
     )
 
     client.tree.add_command(
@@ -1259,12 +1298,13 @@ def setup_economy(client):
             name="economyinfo",
             description="Muestra la configuración de la economía",
             callback=economy_info
-        )
+        ),
+        guild=GUILD
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # READY
-    # --------------------------------------------------------
+    # ========================================================
 
     client.add_listener(
         economy_on_ready,
