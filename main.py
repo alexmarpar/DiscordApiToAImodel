@@ -9,18 +9,35 @@ from modules.stats import setup_stats
 from modules.economy import setup_economy
 from modules.shop import setup_shop
 
+
+# ============================================================
+# CONFIG
+# ============================================================
+
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))
+
+GUILD_ID = int(
+    os.getenv("GUILD_ID", "0")
+)
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN no está definido")
+    raise RuntimeError(
+        "DISCORD_TOKEN no está definido"
+    )
 
 if GUILD_ID == 0:
-    raise RuntimeError("GUILD_ID no está definido")
+    raise RuntimeError(
+        "GUILD_ID no está definido"
+    )
 
-GUILD = discord.Object(id=GUILD_ID)
+GUILD = discord.Object(
+    id=GUILD_ID
+)
 
 
+# ============================================================
+# INTENTS
+# ============================================================
 
 intents = discord.Intents.default()
 
@@ -30,6 +47,9 @@ intents.voice_states = True
 intents.presences = True
 
 
+# ============================================================
+# CLIENT
+# ============================================================
 
 client = commands.Bot(
     command_prefix="!",
@@ -113,17 +133,19 @@ async def main():
     setup_ai(client)
     setup_stats(client)
     setup_economy(client)
-    await setup_shop(client)
+    setup_shop(client)
 
     print(
         "[MAIN] Módulos registrados correctamente",
         flush=True
     )
 
-
     await client.start(TOKEN)
 
 
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
 
