@@ -31,7 +31,7 @@ CURRENCY = os.getenv(
 
 CURRENCY_SYMBOL = os.getenv(
     "CURRENCY_SYMBOL",
-    "🪙"
+    "💰"
 )
 
 
@@ -725,7 +725,7 @@ async def economy_balance(
     )
 
     embed.add_field(
-        name="💰 Dinero",
+        name=f"{CURRENCY_SYMBOL}Cripsys",
         value=format_money(balance),
         inline=False
     )
@@ -1145,13 +1145,13 @@ async def economy_info(
 ):
 
     embed = discord.Embed(
-        title="🪙 Economía",
+        title=f"{CURRENCY_SYMBOL} Economía",
         description="Sistema económico del servidor.",
         color=discord.Color.gold()
     )
 
     embed.add_field(
-        name="💰 Moneda",
+        name="Moneda",
         value=f"{CURRENCY_SYMBOL} {CURRENCY}",
         inline=True
     )
@@ -1184,7 +1184,7 @@ async def economy_info(
     )
 
     embed.add_field(
-        name="🪙 Saldo inicial",
+        name=f"{CURRENCY_SYMBOL} Saldo inicial",
         value=format_money(STARTING_BALANCE),
         inline=True
     )
