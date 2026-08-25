@@ -1,29 +1,35 @@
-# modules/shop.py
-
 import os
 from datetime import datetime, timezone
+from decimal import Decimal
 
-import aiosqlite
 import discord
+from psycopg_pool import AsyncConnectionPool
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-DB = os.getenv(
-    "ECONOMY_DB",
-    "economy.db"
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL no está definido"
+    )
+
 
 GUILD_ID = int(
-    os.getenv("GUILD_ID", "0")
+    os.getenv(
+        "GUILD_ID",
+        "0"
+    )
 )
 
 if GUILD_ID == 0:
     raise RuntimeError(
         "GUILD_ID no está definido"
     )
+
 
 GUILD = discord.Object(
     id=GUILD_ID
@@ -52,104 +58,193 @@ CURRENCY_SYMBOL = os.getenv(
 _client = None
 _initialized = False
 
+_db_pool = None
+
 
 # ============================================================
 # UTILIDADES
 # ============================================================
 
 def now():
-    return datetime.now(timezone.utc)
+    return datetime.now(
+        timezone.utc
+    )
 
 
 def format_money(amount):
-    return f"{CURRENCY_SYMBOL} {amount:,}"
+
+    amount = Decimal(
+        str(amount)
+    )
+
+    return (
+        f"{CURRENCY_SYMBOL} "
+        f"{amount:,.2f}"
+    )
 
 
 # ============================================================
 # DATABASE
 # ============================================================
 
+async def db_execute(
+    query,
+    params=(),
+    fetch=False,
+    fetchall=False
+):
+
+    if _db_pool is None:
+
+        raise RuntimeError(
+            "El pool de PostgreSQL no está inicializado"
+        )
+
+    async with _db_pool.connection() as conn:
+
+        async with conn.cursor() as cursor:
+
+            await cursor.execute(
+                query,
+                params
+            )
+
+            if fetch:
+
+                result = await cursor.fetchone()
+
+                await conn.commit()
+
+                return result
+
+            if fetchall:
+
+                result = await cursor.fetchall()
+
+                await conn.commit()
+
+                return result
+
+            await conn.commit()
+
+            return None
+
+
+# ============================================================
+# DATABASE INIT
+# ============================================================
+
 async def init_db():
 
+    global _db_pool
+
     print(
-        "[SHOP][DB] Inicializando...",
+        "[SHOP][DB] Conectando a Neon...",
         flush=True
     )
 
-    async with aiosqlite.connect(DB) as db:
+    _db_pool = AsyncConnectionPool(
+        conninfo=DATABASE_URL,
+        min_size=1,
+        max_size=5,
+        open=False
+    )
 
-        # ----------------------------------------------------
-        # PRODUCTOS
-        # ----------------------------------------------------
+    await _db_pool.open()
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS shop_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+    await db_execute(
+        "SELECT 1",
+        fetch=True
+    )
 
-                name TEXT NOT NULL UNIQUE,
+    print(
+        "[SHOP][DB] Conectado a Neon",
+        flush=True
+    )
 
-                description TEXT,
+    # ========================================================
+    # PRODUCTOS
+    # ========================================================
 
-                price INTEGER NOT NULL,
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS shop_items (
 
-                stock INTEGER NOT NULL DEFAULT -1,
+            id BIGSERIAL PRIMARY KEY,
 
-                role_id INTEGER,
+            name TEXT NOT NULL UNIQUE,
 
-                created_at TEXT NOT NULL
-            )
-        """)
+            description TEXT,
 
-        # ----------------------------------------------------
-        # INVENTARIO
-        # ----------------------------------------------------
+            price NUMERIC(20, 2)
+                NOT NULL,
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS inventory (
-                guild_id INTEGER NOT NULL,
+            stock INTEGER
+                NOT NULL
+                DEFAULT -1,
 
-                user_id INTEGER NOT NULL,
+            role_id BIGINT,
 
-                item_id INTEGER NOT NULL,
+            created_at TIMESTAMPTZ
+                NOT NULL
+        )
+    """)
 
-                quantity INTEGER NOT NULL DEFAULT 0,
+    # ========================================================
+    # INVENTARIO
+    # ========================================================
 
-                created_at TEXT NOT NULL,
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS inventory (
 
-                updated_at TEXT NOT NULL,
+            guild_id BIGINT NOT NULL,
 
-                PRIMARY KEY (
-                    guild_id,
-                    user_id,
-                    item_id
-                ),
+            user_id BIGINT NOT NULL,
 
-                FOREIGN KEY (
-                    item_id
-                )
+            item_id BIGINT NOT NULL,
+
+            quantity INTEGER
+                NOT NULL
+                DEFAULT 0,
+
+            created_at TIMESTAMPTZ
+                NOT NULL,
+
+            updated_at TIMESTAMPTZ
+                NOT NULL,
+
+            PRIMARY KEY (
+                guild_id,
+                user_id,
+                item_id
+            ),
+
+            CONSTRAINT fk_inventory_item
+                FOREIGN KEY (item_id)
                 REFERENCES shop_items(id)
                 ON DELETE CASCADE
-            )
-        """)
+        )
+    """)
 
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS
-            idx_shop_items_name
+    # ========================================================
+    # INDICES
+    # ========================================================
 
-            ON shop_items(name)
-        """)
+    await db_execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_shop_items_name
 
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS
-            idx_inventory_user
+        ON shop_items(name)
+    """)
 
-            ON inventory(
-                guild_id,
-                user_id
-            )
-        """)
+    await db_execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_inventory_user
 
-        await db.commit()
+        ON inventory(
+            guild_id,
+            user_id
+        )
+    """)
 
     print(
         "[SHOP][DB] Base de datos lista",
@@ -160,6 +255,7 @@ async def init_db():
 # ============================================================
 # /SHOP
 # ============================================================
+
 async def shop_command(
     interaction: discord.Interaction
 ):
@@ -180,32 +276,27 @@ async def shop_command(
 
     try:
 
-        async with aiosqlite.connect(DB) as db:
+        items = await db_execute(
+            """
+            SELECT
+                id,
+                name,
+                description,
+                price,
+                stock,
+                role_id
 
-            cursor = await db.execute("""
-                SELECT
-                    id,
-                    name,
-                    description,
-                    price,
-                    stock,
-                    role_id
+            FROM shop_items
 
-                FROM shop_items
-
-                ORDER BY price ASC
-            """)
-
-            items = await cursor.fetchall()
+            ORDER BY price ASC
+            """,
+            fetchall=True
+        )
 
         print(
             f"[SHOP] Productos encontrados: {len(items)}",
             flush=True
         )
-
-        # ----------------------------------------------------
-        # TIENDA VACÍA
-        # ----------------------------------------------------
 
         if not items:
 
@@ -215,10 +306,6 @@ async def shop_command(
             )
 
             return
-
-        # ----------------------------------------------------
-        # EMBED
-        # ----------------------------------------------------
 
         embed = discord.Embed(
             title="🛒 Tienda",
@@ -312,6 +399,8 @@ async def shop_command(
                 "❌ Ha ocurrido un error al cargar la tienda.",
                 ephemeral=True
             )
+
+
 # ============================================================
 # /BUY
 # ============================================================
@@ -352,238 +441,295 @@ async def buy_command(
     guild_id = interaction.guild.id
     user_id = interaction.user.id
 
-    async with aiosqlite.connect(DB) as db:
+    # ========================================================
+    # TRANSACCIÓN COMPLETA
+    # ========================================================
 
-        # ----------------------------------------------------
-        # TRANSACTION
-        # ----------------------------------------------------
+    async with _db_pool.connection() as conn:
 
-        await db.execute(
-            "BEGIN IMMEDIATE"
-        )
+        try:
 
-        # ----------------------------------------------------
-        # PRODUCTO
-        # ----------------------------------------------------
+            async with conn.transaction():
 
-        cursor = await db.execute("""
-            SELECT
-                id,
-                name,
-                description,
-                price,
-                stock,
-                role_id
-            FROM shop_items
+                async with conn.cursor() as cursor:
 
-            WHERE LOWER(name) = LOWER(?)
-        """, (item,))
+                    # ========================================
+                    # PRODUCTO
+                    # ========================================
 
-        shop_item = await cursor.fetchone()
+                    await cursor.execute(
+                        """
+                        SELECT
+                            id,
+                            name,
+                            description,
+                            price,
+                            stock,
+                            role_id
 
-        if shop_item is None:
+                        FROM shop_items
 
-            await db.rollback()
+                        WHERE LOWER(name) =
+                              LOWER(%s)
 
-            await interaction.response.send_message(
-                f"❌ No existe el objeto **{item}**.",
-                ephemeral=True
+                        FOR UPDATE
+                        """,
+                        (
+                            item,
+                        )
+                    )
+
+                    shop_item = (
+                        await cursor.fetchone()
+                    )
+
+                    if shop_item is None:
+
+                        await interaction.response.send_message(
+                            f"❌ No existe el objeto **{item}**.",
+                            ephemeral=True
+                        )
+
+                        return
+
+                    (
+                        item_id,
+                        item_name,
+                        description,
+                        price,
+                        stock,
+                        role_id
+                    ) = shop_item
+
+                    # ========================================
+                    # STOCK
+                    # ========================================
+
+                    if (
+                        stock != -1
+                        and stock < quantity
+                    ):
+
+                        await interaction.response.send_message(
+                            f"❌ No hay suficiente stock.\n"
+                            f"Disponible: **{stock}**.",
+                            ephemeral=True
+                        )
+
+                        return
+
+                    # ========================================
+                    # CUENTA
+                    # ========================================
+
+                    await cursor.execute(
+                        """
+                        SELECT balance
+
+                        FROM accounts
+
+                        WHERE guild_id = %s
+                        AND user_id = %s
+
+                        FOR UPDATE
+                        """,
+                        (
+                            guild_id,
+                            user_id
+                        )
+                    )
+
+                    account = (
+                        await cursor.fetchone()
+                    )
+
+                    if account is None:
+
+                        await interaction.response.send_message(
+                            "❌ No tienes una cuenta económica.",
+                            ephemeral=True
+                        )
+
+                        return
+
+                    balance = Decimal(
+                        str(account[0])
+                    )
+
+                    # ========================================
+                    # PRECIO
+                    # ========================================
+
+                    total_price = (
+                        Decimal(str(price))
+                        * quantity
+                    )
+
+                    if balance < total_price:
+
+                        await interaction.response.send_message(
+                            "❌ No tienes suficiente dinero.\n\n"
+                            f"💰 Precio: **{format_money(total_price)}**\n"
+                            f"💳 Tu saldo: **{format_money(balance)}**",
+                            ephemeral=True
+                        )
+
+                        return
+
+                    current = now()
+
+                    # ========================================
+                    # RESTAR DINERO
+                    # ========================================
+
+                    await cursor.execute(
+                        """
+                        UPDATE accounts
+
+                        SET
+                            balance =
+                                balance - %s,
+
+                            updated_at = %s
+
+                        WHERE guild_id = %s
+                        AND user_id = %s
+                        """,
+                        (
+                            total_price,
+                            current,
+                            guild_id,
+                            user_id
+                        )
+                    )
+
+                    # ========================================
+                    # TRANSACCIÓN ECONÓMICA
+                    # ========================================
+
+                    await cursor.execute(
+                        """
+                        INSERT INTO transactions (
+                            guild_id,
+                            from_user_id,
+                            to_user_id,
+                            amount,
+                            type,
+                            description,
+                            timestamp
+                        )
+
+                        VALUES (
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s
+                        )
+                        """,
+                        (
+                            guild_id,
+                            user_id,
+                            None,
+                            total_price,
+                            "shop",
+                            f"Compra: {quantity}x {item_name}",
+                            current
+                        )
+                    )
+
+                    # ========================================
+                    # STOCK
+                    # ========================================
+
+                    if stock != -1:
+
+                        await cursor.execute(
+                            """
+                            UPDATE shop_items
+
+                            SET stock =
+                                stock - %s
+
+                            WHERE id = %s
+                            """,
+                            (
+                                quantity,
+                                item_id
+                            )
+                        )
+
+                    # ========================================
+                    # INVENTARIO
+                    # ========================================
+
+                    await cursor.execute(
+                        """
+                        INSERT INTO inventory (
+                            guild_id,
+                            user_id,
+                            item_id,
+                            quantity,
+                            created_at,
+                            updated_at
+                        )
+
+                        VALUES (
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s
+                        )
+
+                        ON CONFLICT (
+                            guild_id,
+                            user_id,
+                            item_id
+                        )
+
+                        DO UPDATE SET
+
+                            quantity =
+                                inventory.quantity
+                                + EXCLUDED.quantity,
+
+                            updated_at =
+                                EXCLUDED.updated_at
+                        """,
+                        (
+                            guild_id,
+                            user_id,
+                            item_id,
+                            quantity,
+                            current,
+                            current
+                        )
+                    )
+
+        except Exception as error:
+
+            print(
+                f"[SHOP] Error en compra: "
+                f"{type(error).__name__}: {error}",
+                flush=True
             )
+
+            if not interaction.response.is_done():
+
+                await interaction.response.send_message(
+                    "❌ No se pudo completar la compra.",
+                    ephemeral=True
+                )
 
             return
 
-        (
-            item_id,
-            item_name,
-            description,
-            price,
-            stock,
-            role_id
-        ) = shop_item
-
-        # ----------------------------------------------------
-        # STOCK
-        # ----------------------------------------------------
-
-        if stock != -1 and stock < quantity:
-
-            await db.rollback()
-
-            await interaction.response.send_message(
-                f"❌ No hay suficiente stock.\n"
-                f"Disponible: **{stock}**.",
-                ephemeral=True
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # CUENTA
-        # ----------------------------------------------------
-
-        cursor = await db.execute("""
-            SELECT balance
-            FROM accounts
-
-            WHERE guild_id = ?
-            AND user_id = ?
-        """, (
-            guild_id,
-            user_id
-        ))
-
-        account = await cursor.fetchone()
-
-        if account is None:
-
-            await db.rollback()
-
-            await interaction.response.send_message(
-                "❌ No tienes una cuenta económica.",
-                ephemeral=True
-            )
-
-            return
-
-        balance = account[0]
-
-        # ----------------------------------------------------
-        # PRECIO
-        # ----------------------------------------------------
-
-        total_price = price * quantity
-
-        if balance < total_price:
-
-            await db.rollback()
-
-            await interaction.response.send_message(
-                "❌ No tienes suficiente dinero.\n\n"
-                f"💰 Precio: **{format_money(total_price)}**\n"
-                f"💳 Tu saldo: **{format_money(balance)}**",
-                ephemeral=True
-            )
-
-            return
-
-        current = now().isoformat()
-
-        # ----------------------------------------------------
-        # RESTAR DINERO
-        # ----------------------------------------------------
-
-        await db.execute("""
-            UPDATE accounts
-
-            SET
-                balance = balance - ?,
-                updated_at = ?
-
-            WHERE guild_id = ?
-            AND user_id = ?
-        """, (
-            total_price,
-            current,
-            guild_id,
-            user_id
-        ))
-
-        # ----------------------------------------------------
-        # TRANSACCIÓN ECONÓMICA
-        # ----------------------------------------------------
-
-        await db.execute("""
-            INSERT INTO transactions (
-                guild_id,
-
-                from_user_id,
-                to_user_id,
-
-                amount,
-
-                type,
-
-                description,
-
-                timestamp
-            )
-
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            guild_id,
-
-            user_id,
-            None,
-
-            total_price,
-
-            "shop",
-
-            f"Compra: {quantity}x {item_name}",
-
-            current
-        ))
-
-        # ----------------------------------------------------
-        # STOCK
-        # ----------------------------------------------------
-
-        if stock != -1:
-
-            await db.execute("""
-                UPDATE shop_items
-
-                SET stock = stock - ?
-
-                WHERE id = ?
-            """, (
-                quantity,
-                item_id
-            ))
-
-        # ----------------------------------------------------
-        # INVENTARIO
-        # ----------------------------------------------------
-
-        await db.execute("""
-            INSERT INTO inventory (
-                guild_id,
-                user_id,
-                item_id,
-                quantity,
-                created_at,
-                updated_at
-            )
-
-            VALUES (?, ?, ?, ?, ?, ?)
-
-            ON CONFLICT (
-                guild_id,
-                user_id,
-                item_id
-            )
-
-            DO UPDATE SET
-                quantity =
-                    inventory.quantity
-                    + excluded.quantity,
-
-                updated_at =
-                    excluded.updated_at
-        """, (
-            guild_id,
-            user_id,
-            item_id,
-            quantity,
-            current,
-            current
-        ))
-
-        await db.commit()
-
-    # --------------------------------------------------------
+    # ========================================================
     # ROL
-    # --------------------------------------------------------
+    # ========================================================
 
     if role_id:
 
@@ -597,18 +743,23 @@ async def buy_command(
 
                 await interaction.user.add_roles(
                     role,
-                    reason=f"Compra en tienda: {item_name}"
+                    reason=(
+                        f"Compra en tienda: "
+                        f"{item_name}"
+                    )
                 )
 
             except discord.Forbidden:
 
                 pass
 
-    # --------------------------------------------------------
+    # ========================================================
     # RESPUESTA
-    # --------------------------------------------------------
+    # ========================================================
 
-    new_balance = balance - total_price
+    new_balance = (
+        balance - total_price
+    )
 
     embed = discord.Embed(
         title="🛒 Compra realizada",
@@ -618,19 +769,25 @@ async def buy_command(
 
     embed.add_field(
         name="📦 Producto",
-        value=f"{item_name} × {quantity}",
+        value=(
+            f"{item_name} × {quantity}"
+        ),
         inline=False
     )
 
     embed.add_field(
         name="💸 Precio",
-        value=format_money(total_price),
+        value=format_money(
+            total_price
+        ),
         inline=True
     )
 
     embed.add_field(
         name="💰 Saldo restante",
-        value=format_money(new_balance),
+        value=format_money(
+            new_balance
+        ),
         inline=True
     )
 
@@ -642,6 +799,7 @@ async def buy_command(
 # ============================================================
 # /INVENTORY
 # ============================================================
+
 async def inventory_command(
     interaction: discord.Interaction,
     user: discord.Member = None
@@ -656,8 +814,8 @@ async def inventory_command(
 
         return
 
-    # Si no especifica usuario, muestra el suyo
     if user is None:
+
         user = interaction.user
 
     if user.bot:
@@ -669,34 +827,30 @@ async def inventory_command(
 
         return
 
-    async with aiosqlite.connect(DB) as db:
+    items = await db_execute(
+        """
+        SELECT
+            s.name,
+            s.description,
+            i.quantity
 
-        cursor = await db.execute("""
-            SELECT
-                s.name,
-                s.description,
-                i.quantity
+        FROM inventory i
 
-            FROM inventory i
+        INNER JOIN shop_items s
+            ON s.id = i.item_id
 
-            INNER JOIN shop_items s
-                ON s.id = i.item_id
+        WHERE i.guild_id = %s
+        AND i.user_id = %s
+        AND i.quantity > 0
 
-            WHERE i.guild_id = ?
-            AND i.user_id = ?
-            AND i.quantity > 0
-
-            ORDER BY s.name ASC
-        """, (
+        ORDER BY s.name ASC
+        """,
+        (
             interaction.guild.id,
             user.id
-        ))
-
-        items = await cursor.fetchall()
-
-    # --------------------------------------------------------
-    # SIN INVENTARIO
-    # --------------------------------------------------------
+        ),
+        fetchall=True
+    )
 
     if not items:
 
@@ -706,10 +860,6 @@ async def inventory_command(
         )
 
         return
-
-    # --------------------------------------------------------
-    # EMBED
-    # --------------------------------------------------------
 
     embed = discord.Embed(
         title="🎒 Inventario",
@@ -743,6 +893,8 @@ async def inventory_command(
     await interaction.response.send_message(
         embed=embed
     )
+
+
 # ============================================================
 # /SHOPINFO
 # ============================================================
@@ -751,14 +903,13 @@ async def shop_info_command(
     interaction: discord.Interaction
 ):
 
-    async with aiosqlite.connect(DB) as db:
-
-        cursor = await db.execute("""
-            SELECT COUNT(*)
-            FROM shop_items
-        """)
-
-        result = await cursor.fetchone()
+    result = await db_execute(
+        """
+        SELECT COUNT(*)
+        FROM shop_items
+        """,
+        fetch=True
+    )
 
     item_count = result[0]
 
@@ -785,11 +936,15 @@ async def shop_info_command(
     await interaction.response.send_message(
         embed=embed
     )
+
+
 # ============================================================
 # ADMIN CHECK
 # ============================================================
 
-def is_admin(interaction: discord.Interaction):
+def is_admin(
+    interaction: discord.Interaction
+):
 
     return (
         interaction.guild is not None
@@ -801,7 +956,9 @@ def is_admin(interaction: discord.Interaction):
 # /SHOP_ADD
 # ============================================================
 
-@discord.app_commands.default_permissions(administrator=True)
+@discord.app_commands.default_permissions(
+    administrator=True
+)
 async def shop_add_command(
     interaction: discord.Interaction,
     name: str,
@@ -812,10 +969,12 @@ async def shop_add_command(
 ):
 
     if not is_admin(interaction):
+
         await interaction.response.send_message(
             "❌ Solo los administradores pueden utilizar este comando.",
             ephemeral=True
         )
+
         return
 
     if price < 0:
@@ -841,7 +1000,10 @@ async def shop_add_command(
     if role_id:
 
         try:
-            parsed_role_id = int(role_id)
+
+            parsed_role_id = int(
+                role_id
+            )
 
         except ValueError:
 
@@ -865,36 +1027,41 @@ async def shop_add_command(
 
             return
 
-    async with aiosqlite.connect(DB) as db:
+    try:
 
-        try:
-
-            await db.execute(
-                """
-                INSERT INTO shop_items (
-                    name,
-                    description,
-                    price,
-                    stock,
-                    role_id,
-                    created_at
-                )
-
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    name,
-                    description,
-                    price,
-                    stock,
-                    parsed_role_id,
-                    now().isoformat()
-                )
+        await db_execute(
+            """
+            INSERT INTO shop_items (
+                name,
+                description,
+                price,
+                stock,
+                role_id,
+                created_at
             )
 
-            await db.commit()
+            VALUES (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            """,
+            (
+                name,
+                description,
+                price,
+                stock,
+                parsed_role_id,
+                now()
+            )
+        )
 
-        except aiosqlite.IntegrityError:
+    except Exception as error:
+
+        if "duplicate key" in str(error).lower():
 
             await interaction.response.send_message(
                 f"❌ Ya existe **{name}**.",
@@ -902,6 +1069,8 @@ async def shop_add_command(
             )
 
             return
+
+        raise
 
     await interaction.response.send_message(
         f"✅ Producto **{name}** creado.\n"
@@ -913,53 +1082,61 @@ async def shop_add_command(
 # /SHOP_REMOVE
 # ============================================================
 
-@discord.app_commands.default_permissions(administrator=True)
+@discord.app_commands.default_permissions(
+    administrator=True
+)
 async def shop_remove_command(
     interaction: discord.Interaction,
     name: str
 ):
 
     if not is_admin(interaction):
+
         await interaction.response.send_message(
             "❌ Solo los administradores pueden utilizar este comando.",
             ephemeral=True
         )
+
         return
 
-    async with aiosqlite.connect(DB) as db:
+    item = await db_execute(
+        """
+        SELECT
+            id,
+            name
 
-        cursor = await db.execute(
-            """
-            SELECT id, name
-            FROM shop_items
+        FROM shop_items
 
-            WHERE LOWER(name) = LOWER(?)
-            """,
-            (name,)
+        WHERE LOWER(name) =
+              LOWER(%s)
+        """,
+        (
+            name,
+        ),
+        fetch=True
+    )
+
+    if item is None:
+
+        await interaction.response.send_message(
+            f"❌ No existe **{name}**.",
+            ephemeral=True
         )
 
-        item = await cursor.fetchone()
+        return
 
-        if item is None:
+    item_id, item_name = item
 
-            await interaction.response.send_message(
-                f"❌ No existe **{name}**.",
-                ephemeral=True
-            )
+    await db_execute(
+        """
+        DELETE FROM shop_items
 
-            return
-
-        item_id, item_name = item
-
-        await db.execute(
-            """
-            DELETE FROM shop_items
-            WHERE id = ?
-            """,
-            (item_id,)
+        WHERE id = %s
+        """,
+        (
+            item_id,
         )
-
-        await db.commit()
+    )
 
     await interaction.response.send_message(
         f"🗑️ Producto **{item_name}** eliminado."
@@ -970,7 +1147,9 @@ async def shop_remove_command(
 # /SHOP_EDIT
 # ============================================================
 
-@discord.app_commands.default_permissions(administrator=True)
+@discord.app_commands.default_permissions(
+    administrator=True
+)
 async def shop_edit_command(
     interaction: discord.Interaction,
     name: str,
@@ -1012,12 +1191,16 @@ async def shop_edit_command(
     if role_id is not None:
 
         if role_id == "":
+
             parsed_role_id = None
 
         else:
 
             try:
-                parsed_role_id = int(role_id)
+
+                parsed_role_id = int(
+                    role_id
+                )
 
             except ValueError:
 
@@ -1039,17 +1222,13 @@ async def shop_edit_command(
 
                 return
 
-    # --------------------------------------------------------
-    # Construir UPDATE
-    # --------------------------------------------------------
-
     updates = []
     values = []
 
     if price is not None:
 
         updates.append(
-            "price = ?"
+            "price = %s"
         )
 
         values.append(price)
@@ -1057,7 +1236,7 @@ async def shop_edit_command(
     if stock is not None:
 
         updates.append(
-            "stock = ?"
+            "stock = %s"
         )
 
         values.append(stock)
@@ -1065,7 +1244,7 @@ async def shop_edit_command(
     if description is not None:
 
         updates.append(
-            "description = ?"
+            "description = %s"
         )
 
         values.append(description)
@@ -1073,10 +1252,12 @@ async def shop_edit_command(
     if role_id is not None:
 
         updates.append(
-            "role_id = ?"
+            "role_id = %s"
         )
 
-        values.append(parsed_role_id)
+        values.append(
+            parsed_role_id
+        )
 
     if not updates:
 
@@ -1087,49 +1268,54 @@ async def shop_edit_command(
 
         return
 
-    async with aiosqlite.connect(DB) as db:
+    item = await db_execute(
+        """
+        SELECT id
 
-        cursor = await db.execute(
-            """
-            SELECT id
-            FROM shop_items
+        FROM shop_items
 
-            WHERE LOWER(name) = LOWER(?)
-            """,
-            (name,)
+        WHERE LOWER(name) =
+              LOWER(%s)
+        """,
+        (
+            name,
+        ),
+        fetch=True
+    )
+
+    if item is None:
+
+        await interaction.response.send_message(
+            f"❌ No existe **{name}**.",
+            ephemeral=True
         )
 
-        item = await cursor.fetchone()
+        return
 
-        if item is None:
+    item_id = item[0]
 
-            await interaction.response.send_message(
-                f"❌ No existe **{name}**.",
-                ephemeral=True
-            )
+    values.append(
+        item_id
+    )
 
-            return
+    query = f"""
+        UPDATE shop_items
 
-        item_id = item[0]
+        SET {", ".join(updates)}
 
-        values.append(item_id)
+        WHERE id = %s
+    """
 
-        await db.execute(
-            f"""
-            UPDATE shop_items
-
-            SET {", ".join(updates)}
-
-            WHERE id = ?
-            """,
-            values
-        )
-
-        await db.commit()
+    await db_execute(
+        query,
+        values
+    )
 
     await interaction.response.send_message(
         f"✅ Producto **{name}** actualizado."
     )
+
+
 # ============================================================
 # READY
 # ============================================================
@@ -1139,6 +1325,7 @@ async def shop_on_ready():
     global _initialized
 
     if _initialized:
+
         return
 
     print(
@@ -1187,7 +1374,9 @@ def setup_shop(client):
     client.tree.add_command(
         discord.app_commands.Command(
             name="shop",
-            description="Muestra los productos de la tienda.",
+            description=(
+                "Muestra los productos de la tienda."
+            ),
             callback=shop_command
         ),
         guild=GUILD
@@ -1200,7 +1389,9 @@ def setup_shop(client):
     client.tree.add_command(
         discord.app_commands.Command(
             name="buy",
-            description="Compra un producto de la tienda.",
+            description=(
+                "Compra un producto de la tienda."
+            ),
             callback=buy_command
         ),
         guild=GUILD
@@ -1213,7 +1404,9 @@ def setup_shop(client):
     client.tree.add_command(
         discord.app_commands.Command(
             name="inventory",
-            description="Muestra tu inventario.",
+            description=(
+                "Muestra tu inventario."
+            ),
             callback=inventory_command
         ),
         guild=GUILD
@@ -1226,45 +1419,62 @@ def setup_shop(client):
     client.tree.add_command(
         discord.app_commands.Command(
             name="shopinfo",
-            description="Muestra información de la tienda.",
+            description=(
+                "Muestra información de la tienda."
+            ),
             callback=shop_info_command
         ),
         guild=GUILD
     )
 
     # ========================================================
-    # ADMIN COMMANDS
+    # /SHOP_ADD
     # ========================================================
 
     client.tree.add_command(
         discord.app_commands.Command(
             name="shop_add",
-            description="Crea un producto en la tienda.",
+            description=(
+                "Crea un producto en la tienda."
+            ),
             callback=shop_add_command
         ),
         guild=GUILD
     )
 
+    # ========================================================
+    # /SHOP_REMOVE
+    # ========================================================
+
     client.tree.add_command(
         discord.app_commands.Command(
             name="shop_remove",
-            description="Elimina un producto de la tienda.",
-            callback=shop_remove_command,
+            description=(
+                "Elimina un producto de la tienda."
+            ),
+            callback=shop_remove_command
         ),
         guild=GUILD
     )
 
+    # ========================================================
+    # /SHOP_EDIT
+    # ========================================================
+
     client.tree.add_command(
         discord.app_commands.Command(
             name="shop_edit",
-            description="Edita un producto de la tienda.",
-            callback=shop_edit_command,
+            description=(
+                "Edita un producto de la tienda."
+            ),
+            callback=shop_edit_command
         ),
         guild=GUILD
     )
-# ========================================================
-# READY
-# ========================================================
+
+    # ========================================================
+    # READY
+    # ========================================================
 
     client.add_listener(
         shop_on_ready,

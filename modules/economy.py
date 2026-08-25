@@ -3,7 +3,9 @@ import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 
-import aiosqlite
+import psycopg
+from psycopg_pool import AsyncConnectionPool
+
 import discord
 
 
@@ -11,10 +13,13 @@ import discord
 # CONFIG
 # ============================================================
 
-DB = os.getenv(
-    "ECONOMY_DB",
-    "economy.db"
-)
+DATABASE_URL = os.getenv("DATABASE_ECONOMY_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_ECONOMY_URL no está definido"
+    )
+
 
 GUILD_ID = int(
     os.getenv(
@@ -27,6 +32,7 @@ if GUILD_ID == 0:
     raise RuntimeError(
         "GUILD_ID no está definido"
     )
+
 
 GUILD = discord.Object(
     id=GUILD_ID
@@ -52,12 +58,18 @@ CURRENCY_SYMBOL = os.getenv(
 # SALDO INICIAL
 # ============================================================
 
-STARTING_BALANCE = Decimal(
-    os.getenv(
-        "STARTING_BALANCE",
-        "0"
+try:
+
+    STARTING_BALANCE = Decimal(
+        os.getenv(
+            "STARTING_BALANCE",
+            "0"
+        )
     )
-)
+
+except InvalidOperation:
+
+    STARTING_BALANCE = Decimal("0")
 
 
 # ============================================================
@@ -87,6 +99,7 @@ VOICE_ACTIVITY_INTERVAL = int(
     )
 )
 
+
 VOICE_REQUIRE_OTHERS = (
     os.getenv(
         "VOICE_REQUIRE_OTHERS",
@@ -99,6 +112,7 @@ VOICE_REQUIRE_OTHERS = (
         "on"
     )
 )
+
 
 VOICE_IGNORE_AFK = (
     os.getenv(
@@ -123,6 +137,8 @@ _client = None
 _initialized = False
 
 _voice_task = None
+
+_db_pool = None
 
 
 # ============================================================
@@ -149,10 +165,23 @@ def parse_time(value):
     if not value:
         return None
 
+    if isinstance(
+        value,
+        datetime
+    ):
+
+        if value.tzinfo is None:
+
+            return value.replace(
+                tzinfo=timezone.utc
+            )
+
+        return value
+
     try:
 
         return datetime.fromisoformat(
-            value
+            str(value)
         )
 
     except Exception:
@@ -174,9 +203,7 @@ def decimal_value(value):
         TypeError
     ):
 
-        return Decimal(
-            "0"
-        )
+        return Decimal("0")
 
 
 def money_decimal(value):
@@ -187,9 +214,12 @@ def money_decimal(value):
         Decimal("0.01")
     )
 
+
 def format_money(amount):
 
-    amount = float(amount)
+    amount = decimal_value(
+        amount
+    )
 
     return (
         f"{CURRENCY_SYMBOL} "
@@ -222,32 +252,26 @@ def format_duration(seconds):
     parts = []
 
     if days:
-
         parts.append(
             f"{days}d"
         )
 
     if hours:
-
         parts.append(
             f"{hours}h"
         )
 
     if minutes:
-
         parts.append(
             f"{minutes}m"
         )
 
     if seconds or not parts:
-
         parts.append(
             f"{seconds}s"
         )
 
-    return " ".join(
-        parts
-    )
+    return " ".join(parts)
 
 
 # ============================================================
@@ -261,28 +285,40 @@ async def db_execute(
     fetchall=False
 ):
 
-    async with aiosqlite.connect(
-        DB
-    ) as db:
+    if _db_pool is None:
 
-        cursor = await db.execute(
-            query,
-            params
+        raise RuntimeError(
+            "El pool de PostgreSQL no está inicializado"
         )
 
-        result = None
+    async with _db_pool.connection() as conn:
 
-        if fetch:
+        async with conn.cursor() as cursor:
 
-            result = await cursor.fetchone()
+            await cursor.execute(
+                query,
+                params
+            )
 
-        elif fetchall:
+            if fetch:
 
-            result = await cursor.fetchall()
+                result = await cursor.fetchone()
 
-        await db.commit()
+                await conn.commit()
 
-        return result
+                return result
+
+            if fetchall:
+
+                result = await cursor.fetchall()
+
+                await conn.commit()
+
+                return result
+
+            await conn.commit()
+
+            return None
 
 
 # ============================================================
@@ -291,148 +327,190 @@ async def db_execute(
 
 async def init_db():
 
+    global _db_pool
+
     print(
-        "[ECONOMY][DB] Inicializando...",
+        "[ECONOMY][DB] Conectando a Neon PostgreSQL...",
         flush=True
     )
 
-    async with aiosqlite.connect(
-        DB
-    ) as db:
+    _db_pool = AsyncConnectionPool(
+        conninfo=DATABASE_URL,
+        min_size=1,
+        max_size=5,
+        open=False
+    )
 
-        # ====================================================
-        # CUENTAS
-        # ====================================================
+    await _db_pool.open()
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS accounts (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
+    # ========================================================
+    # TEST DE CONEXIÓN
+    # ========================================================
 
-                balance REAL NOT NULL DEFAULT 0,
-
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-
-                PRIMARY KEY (
-                    guild_id,
-                    user_id
-                )
-            )
-        """)
-
-        # ====================================================
-        # TRANSACCIONES
-        # ====================================================
-
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-                guild_id INTEGER NOT NULL,
-
-                from_user_id INTEGER,
-                to_user_id INTEGER,
-
-                amount REAL NOT NULL,
-
-                type TEXT NOT NULL,
-
-                description TEXT,
-
-                timestamp TEXT NOT NULL
-            )
-        """)
-
-        # ====================================================
-        # ACTIVIDAD DE VOZ
-        # ====================================================
-
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS voice_activity (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-
-                total_seconds INTEGER NOT NULL DEFAULT 0,
-
-                total_earned REAL NOT NULL DEFAULT 0,
-
-                updated_at TEXT NOT NULL,
-
-                PRIMARY KEY (
-                    guild_id,
-                    user_id
-                )
-            )
-        """)
-
-        # ====================================================
-        # SESIONES DE VOZ
-        # ====================================================
-
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS voice_sessions (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-
-                joined_at TEXT NOT NULL,
-                last_paid_at TEXT NOT NULL,
-
-                PRIMARY KEY (
-                    guild_id,
-                    user_id
-                )
-            )
-        """)
-
-        # ====================================================
-        # INDICES
-        # ====================================================
-
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS
-            idx_accounts_guild_balance
-
-            ON accounts(
-                guild_id,
-                balance DESC
-            )
-        """)
-
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS
-            idx_transactions_guild
-
-            ON transactions(
-                guild_id
-            )
-        """)
-
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS
-            idx_transactions_users
-
-            ON transactions(
-                guild_id,
-                from_user_id,
-                to_user_id
-            )
-        """)
-
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS
-            idx_voice_activity_guild
-
-            ON voice_activity(
-                guild_id,
-                total_seconds DESC
-            )
-        """)
-
-        await db.commit()
+    await db_execute(
+        "SELECT 1",
+        fetch=True
+    )
 
     print(
-        "[ECONOMY][DB] Base de datos lista",
+        "[ECONOMY][DB] Conexión con Neon establecida",
+        flush=True
+    )
+
+    # ========================================================
+    # CUENTAS
+    # ========================================================
+
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS accounts (
+
+            guild_id BIGINT NOT NULL,
+
+            user_id BIGINT NOT NULL,
+
+            balance NUMERIC(20, 2)
+                NOT NULL
+                DEFAULT 0,
+
+            created_at TIMESTAMPTZ
+                NOT NULL,
+
+            updated_at TIMESTAMPTZ
+                NOT NULL,
+
+            PRIMARY KEY (
+                guild_id,
+                user_id
+            )
+        )
+    """)
+
+    # ========================================================
+    # TRANSACCIONES
+    # ========================================================
+
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS transactions (
+
+            id BIGSERIAL PRIMARY KEY,
+
+            guild_id BIGINT NOT NULL,
+
+            from_user_id BIGINT,
+
+            to_user_id BIGINT,
+
+            amount NUMERIC(20, 2)
+                NOT NULL,
+
+            type TEXT NOT NULL,
+
+            description TEXT,
+
+            timestamp TIMESTAMPTZ
+                NOT NULL
+        )
+    """)
+
+    # ========================================================
+    # ACTIVIDAD DE VOZ
+    # ========================================================
+
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS voice_activity (
+
+            guild_id BIGINT NOT NULL,
+
+            user_id BIGINT NOT NULL,
+
+            total_seconds BIGINT
+                NOT NULL
+                DEFAULT 0,
+
+            total_earned NUMERIC(20, 2)
+                NOT NULL
+                DEFAULT 0,
+
+            updated_at TIMESTAMPTZ
+                NOT NULL,
+
+            PRIMARY KEY (
+                guild_id,
+                user_id
+            )
+        )
+    """)
+
+    # ========================================================
+    # SESIONES DE VOZ
+    # ========================================================
+
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS voice_sessions (
+
+            guild_id BIGINT NOT NULL,
+
+            user_id BIGINT NOT NULL,
+
+            joined_at TIMESTAMPTZ
+                NOT NULL,
+
+            last_paid_at TIMESTAMPTZ
+                NOT NULL,
+
+            PRIMARY KEY (
+                guild_id,
+                user_id
+            )
+        )
+    """)
+
+    # ========================================================
+    # INDICES
+    # ========================================================
+
+    await db_execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_accounts_guild_balance
+
+        ON accounts(
+            guild_id,
+            balance DESC
+        )
+    """)
+
+    await db_execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_transactions_guild
+
+        ON transactions(
+            guild_id
+        )
+    """)
+
+    await db_execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_transactions_users
+
+        ON transactions(
+            guild_id,
+            from_user_id,
+            to_user_id
+        )
+    """)
+
+    await db_execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_voice_activity_guild
+
+        ON voice_activity(
+            guild_id,
+            total_seconds DESC
+        )
+    """)
+
+    print(
+        "[ECONOMY][DB] Base de datos Neon lista",
         flush=True
     )
 
@@ -446,30 +524,9 @@ async def ensure_account(
     user_id
 ):
 
-    current = iso()
+    current = now()
 
-    existing = await db_execute(
-        """
-        SELECT balance
-        FROM accounts
-
-        WHERE guild_id = ?
-        AND user_id = ?
-        """,
-        (
-            guild_id,
-            user_id
-        ),
-        fetch=True
-    )
-
-    if existing:
-
-        return decimal_value(
-            existing[0]
-        )
-
-    await db_execute(
+    result = await db_execute(
         """
         INSERT INTO accounts (
             guild_id,
@@ -479,49 +536,105 @@ async def ensure_account(
             updated_at
         )
 
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (
+            %s,
+            %s,
+            %s,
+            %s,
+            %s
+        )
+
+        ON CONFLICT (
+            guild_id,
+            user_id
+        )
+
+        DO NOTHING
+
+        RETURNING balance
         """,
         (
             guild_id,
             user_id,
-            float(
-                STARTING_BALANCE
-            ),
+            STARTING_BALANCE,
             current,
             current
-        )
+        ),
+        fetch=True
     )
 
-    if STARTING_BALANCE > 0:
+    # ========================================================
+    # CUENTA NUEVA
+    # ========================================================
 
-        await db_execute(
-            """
-            INSERT INTO transactions (
-                guild_id,
-                from_user_id,
-                to_user_id,
-                amount,
-                type,
-                description,
-                timestamp
+    if result:
+
+        if STARTING_BALANCE > 0:
+
+            await db_execute(
+                """
+                INSERT INTO transactions (
+                    guild_id,
+                    from_user_id,
+                    to_user_id,
+                    amount,
+                    type,
+                    description,
+                    timestamp
+                )
+
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+                """,
+                (
+                    guild_id,
+                    None,
+                    user_id,
+                    STARTING_BALANCE,
+                    "initial",
+                    "Saldo inicial",
+                    current
+                )
             )
 
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                guild_id,
-                None,
-                user_id,
-                float(
-                    STARTING_BALANCE
-                ),
-                "initial",
-                "Saldo inicial",
-                current
-            )
+        return decimal_value(
+            result[0]
         )
 
-    return STARTING_BALANCE
+    # ========================================================
+    # CUENTA YA EXISTENTE
+    # ========================================================
+
+    existing = await db_execute(
+        """
+        SELECT balance
+
+        FROM accounts
+
+        WHERE guild_id = %s
+        AND user_id = %s
+        """,
+        (
+            guild_id,
+            user_id
+        ),
+        fetch=True
+    )
+
+    if not existing:
+
+        return Decimal("0")
+
+    return decimal_value(
+        existing[0]
+    )
 
 
 async def get_balance(
@@ -540,8 +653,8 @@ async def get_balance(
 
         FROM accounts
 
-        WHERE guild_id = ?
-        AND user_id = ?
+        WHERE guild_id = %s
+        AND user_id = %s
         """,
         (
             guild_id,
@@ -552,9 +665,7 @@ async def get_balance(
 
     if not result:
 
-        return Decimal(
-            "0"
-        )
+        return Decimal("0")
 
     return decimal_value(
         result[0]
@@ -573,7 +684,9 @@ async def add_money(
     description=None
 ):
 
-    amount = float(amount)
+    amount = money_decimal(
+        amount
+    )
 
     if amount <= 0:
 
@@ -584,51 +697,67 @@ async def add_money(
         user_id
     )
 
-    current = iso()
+    current = now()
 
-    await db_execute(
-        """
-        UPDATE accounts
+    async with _db_pool.connection() as conn:
 
-        SET
-            balance = balance + ?,
-            updated_at = ?
+        async with conn.transaction():
 
-        WHERE guild_id = ?
-        AND user_id = ?
-        """,
-        (
-            float(amount),
-            current,
-            guild_id,
-            user_id
-        )
-    )
+            async with conn.cursor() as cursor:
 
-    await db_execute(
-        """
-        INSERT INTO transactions (
-            guild_id,
-            from_user_id,
-            to_user_id,
-            amount,
-            type,
-            description,
-            timestamp
-        )
+                await cursor.execute(
+                    """
+                    UPDATE accounts
 
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            guild_id,
-            None,
-            user_id,
-            float(amount),
-            transaction_type,
-            description,
-            current
-        )
-    )
+                    SET
+                        balance =
+                            balance + %s,
+
+                        updated_at = %s
+
+                    WHERE guild_id = %s
+                    AND user_id = %s
+                    """,
+                    (
+                        amount,
+                        current,
+                        guild_id,
+                        user_id
+                    )
+                )
+
+                await cursor.execute(
+                    """
+                    INSERT INTO transactions (
+                        guild_id,
+                        from_user_id,
+                        to_user_id,
+                        amount,
+                        type,
+                        description,
+                        timestamp
+                    )
+
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
+                    """,
+                    (
+                        guild_id,
+                        None,
+                        user_id,
+                        amount,
+                        transaction_type,
+                        description,
+                        current
+                    )
+                )
 
     return True
 
@@ -645,66 +774,91 @@ async def remove_money(
     description=None
 ):
 
-    amount = int(amount)
+    amount = money_decimal(
+        amount
+    )
 
     if amount <= 0:
 
         return False
 
-    balance = await get_balance(
+    await ensure_account(
         guild_id,
         user_id
     )
 
-    if balance < amount:
+    current = now()
 
-        return False
+    async with _db_pool.connection() as conn:
 
-    current = iso()
+        async with conn.transaction():
 
-    await db_execute(
-        """
-        UPDATE accounts
+            async with conn.cursor() as cursor:
 
-        SET
-            balance = balance - ?,
-            updated_at = ?
+                await cursor.execute(
+                    """
+                    UPDATE accounts
 
-        WHERE guild_id = ?
-        AND user_id = ?
-        """,
-        (
-            float(amount),
-            current,
-            guild_id,
-            user_id
-        )
-    )
+                    SET
+                        balance =
+                            balance - %s,
 
-    await db_execute(
-        """
-        INSERT INTO transactions (
-            guild_id,
-            from_user_id,
-            to_user_id,
-            amount,
-            type,
-            description,
-            timestamp
-        )
+                        updated_at = %s
 
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            guild_id,
-            user_id,
-            None,
-            float(amount),
-            transaction_type,
-            description,
-            current
-        )
-    )
+                    WHERE guild_id = %s
+                    AND user_id = %s
+
+                    AND balance >= %s
+
+                    RETURNING balance
+                    """,
+                    (
+                        amount,
+                        current,
+                        guild_id,
+                        user_id,
+                        amount
+                    )
+                )
+
+                result = await cursor.fetchone()
+
+                if not result:
+
+                    return False
+
+                await cursor.execute(
+                    """
+                    INSERT INTO transactions (
+                        guild_id,
+                        from_user_id,
+                        to_user_id,
+                        amount,
+                        type,
+                        description,
+                        timestamp
+                    )
+
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
+                    """,
+                    (
+                        guild_id,
+                        user_id,
+                        None,
+                        amount,
+                        transaction_type,
+                        description,
+                        current
+                    )
+                )
 
     return True
 
@@ -720,7 +874,9 @@ async def transfer_money(
     amount
 ):
 
-    amount = float(amount)
+    amount = money_decimal(
+        amount
+    )
 
     if amount <= 0:
 
@@ -736,93 +892,124 @@ async def transfer_money(
             "No puedes enviarte monedas a ti mismo."
         )
 
-    sender_balance = await get_balance(
+    await ensure_account(
         guild_id,
         from_user_id
     )
-
-    if sender_balance < amount:
-
-        return (
-            False,
-            "No tienes suficientes monedas."
-        )
 
     await ensure_account(
         guild_id,
         to_user_id
     )
 
-    current = iso()
+    current = now()
 
-    async with aiosqlite.connect(
-        DB
-    ) as db:
+    async with _db_pool.connection() as conn:
 
-        await db.execute(
-            """
-            UPDATE accounts
+        async with conn.transaction():
 
-            SET
-                balance = balance - ?,
-                updated_at = ?
+            async with conn.cursor() as cursor:
 
-            WHERE guild_id = ?
-            AND user_id = ?
-            """,
-            (
-                float(amount),
-                current,
-                guild_id,
-                from_user_id
-            )
-        )
+                # ============================================
+                # RESTAR AL REMITENTE
+                # ============================================
 
-        await db.execute(
-            """
-            UPDATE accounts
+                await cursor.execute(
+                    """
+                    UPDATE accounts
 
-            SET
-                balance = balance + ?,
-                updated_at = ?
+                    SET
+                        balance =
+                            balance - %s,
 
-            WHERE guild_id = ?
-            AND user_id = ?
-            """,
-            (
-                float(amount),
-                current,
-                guild_id,
-                to_user_id
-            )
-        )
+                        updated_at = %s
 
-        await db.execute(
-            """
-            INSERT INTO transactions (
-                guild_id,
-                from_user_id,
-                to_user_id,
-                amount,
-                type,
-                description,
-                timestamp
-            )
+                    WHERE guild_id = %s
+                    AND user_id = %s
 
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                guild_id,
-                from_user_id,
-                to_user_id,
-                float(amount),
-                "transfer",
-                "Transferencia entre usuarios",
-                current
-            )
-        )
+                    AND balance >= %s
 
-        await db.commit()
+                    RETURNING balance
+                    """,
+                    (
+                        amount,
+                        current,
+                        guild_id,
+                        from_user_id,
+                        amount
+                    )
+                )
+
+                sender = await cursor.fetchone()
+
+                if not sender:
+
+                    return (
+                        False,
+                        "No tienes suficientes monedas."
+                    )
+
+                # ============================================
+                # SUMAR AL DESTINATARIO
+                # ============================================
+
+                await cursor.execute(
+                    """
+                    UPDATE accounts
+
+                    SET
+                        balance =
+                            balance + %s,
+
+                        updated_at = %s
+
+                    WHERE guild_id = %s
+                    AND user_id = %s
+                    """,
+                    (
+                        amount,
+                        current,
+                        guild_id,
+                        to_user_id
+                    )
+                )
+
+                # ============================================
+                # REGISTRAR TRANSACCIÓN
+                # ============================================
+
+                await cursor.execute(
+                    """
+                    INSERT INTO transactions (
+                        guild_id,
+                        from_user_id,
+                        to_user_id,
+                        amount,
+                        type,
+                        description,
+                        timestamp
+                    )
+
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
+                    """,
+                    (
+                        guild_id,
+                        from_user_id,
+                        to_user_id,
+                        amount,
+                        "transfer",
+                        "Transferencia entre usuarios",
+                        current
+                    )
+                )
 
     return (
         True,
@@ -839,26 +1026,7 @@ async def ensure_voice_activity(
     user_id
 ):
 
-    existing = await db_execute(
-        """
-        SELECT total_seconds
-        FROM voice_activity
-
-        WHERE guild_id = ?
-        AND user_id = ?
-        """,
-        (
-            guild_id,
-            user_id
-        ),
-        fetch=True
-    )
-
-    if existing:
-
-        return
-
-    await db_execute(
+    result = await db_execute(
         """
         INSERT INTO voice_activity (
             guild_id,
@@ -868,12 +1036,25 @@ async def ensure_voice_activity(
             updated_at
         )
 
-        VALUES (?, ?, 0, 0, ?)
+        VALUES (
+            %s,
+            %s,
+            0,
+            0,
+            %s
+        )
+
+        ON CONFLICT (
+            guild_id,
+            user_id
+        )
+
+        DO NOTHING
         """,
         (
             guild_id,
             user_id,
-            iso()
+            now()
         )
     )
 
@@ -893,29 +1074,9 @@ async def start_voice_session(
         user_id
     )
 
-    current = iso()
+    current = now()
 
-    existing = await db_execute(
-        """
-        SELECT user_id
-
-        FROM voice_sessions
-
-        WHERE guild_id = ?
-        AND user_id = ?
-        """,
-        (
-            guild_id,
-            user_id
-        ),
-        fetch=True
-    )
-
-    if existing:
-
-        return
-
-    await db_execute(
+    result = await db_execute(
         """
         INSERT INTO voice_sessions (
             guild_id,
@@ -924,15 +1085,34 @@ async def start_voice_session(
             last_paid_at
         )
 
-        VALUES (?, ?, ?, ?)
+        VALUES (
+            %s,
+            %s,
+            %s,
+            %s
+        )
+
+        ON CONFLICT (
+            guild_id,
+            user_id
+        )
+
+        DO NOTHING
+
+        RETURNING user_id
         """,
         (
             guild_id,
             user_id,
             current,
             current
-        )
+        ),
+        fetch=True
     )
+
+    if not result:
+
+        return
 
     print(
         f"[ECONOMY][VOICE] "
@@ -954,8 +1134,8 @@ async def stop_voice_session(
 
         FROM voice_sessions
 
-        WHERE guild_id = ?
-        AND user_id = ?
+        WHERE guild_id = %s
+        AND user_id = %s
         """,
         (
             guild_id,
@@ -967,14 +1147,6 @@ async def stop_voice_session(
     if not session:
 
         return
-
-    # ========================================================
-    # IMPORTANTE:
-    # Calculamos desde last_paid_at, NO desde joined_at.
-    #
-    # Esto evita pagar dos veces el tiempo que ya procesó
-    # el loop.
-    # ========================================================
 
     last_paid_at = parse_time(
         session[1]
@@ -1008,8 +1180,8 @@ async def stop_voice_session(
         """
         DELETE FROM voice_sessions
 
-        WHERE guild_id = ?
-        AND user_id = ?
+        WHERE guild_id = %s
+        AND user_id = %s
         """,
         (
             guild_id,
@@ -1033,12 +1205,14 @@ async def add_voice_time(
     seconds = int(seconds)
 
     if seconds < 60:
+
         return Decimal("0")
 
-    # Solo minutos completos
     minutes = seconds // 60
 
-    seconds_to_process = minutes * 60
+    seconds_to_process = (
+        minutes * 60
+    )
 
     reward = (
         VOICE_REWARD_PER_MINUTE *
@@ -1050,7 +1224,7 @@ async def add_voice_time(
         rounding=ROUND_DOWN
     )
 
-    current = iso()
+    current = now()
 
     await ensure_voice_activity(
         guild_id,
@@ -1062,94 +1236,106 @@ async def add_voice_time(
         user_id
     )
 
-    async with aiosqlite.connect(DB) as db:
+    async with _db_pool.connection() as conn:
 
-        # ================================================
-        # GUARDAR TIEMPO DE VOZ
-        # ================================================
+        async with conn.transaction():
 
-        await db.execute(
-            """
-            UPDATE voice_activity
+            async with conn.cursor() as cursor:
 
-            SET
-                total_seconds =
-                    total_seconds + ?,
+                # ============================================
+                # GUARDAR TIEMPO DE VOZ
+                # ============================================
 
-                total_earned =
-                    total_earned + ?,
+                await cursor.execute(
+                    """
+                    UPDATE voice_activity
 
-                updated_at = ?
+                    SET
+                        total_seconds =
+                            total_seconds + %s,
 
-            WHERE guild_id = ?
-            AND user_id = ?
-            """,
-            (
-                seconds_to_process,
-                float(reward),
-                current,
-                guild_id,
-                user_id
-            )
-        )
+                        total_earned =
+                            total_earned + %s,
 
-        # ================================================
-        # AÑADIR DINERO AL SALDO
-        # ================================================
+                        updated_at = %s
 
-        await db.execute(
-            """
-            UPDATE accounts
+                    WHERE guild_id = %s
+                    AND user_id = %s
+                    """,
+                    (
+                        seconds_to_process,
+                        reward,
+                        current,
+                        guild_id,
+                        user_id
+                    )
+                )
 
-            SET
-                balance =
-                    balance + ?,
+                # ============================================
+                # AÑADIR DINERO
+                # ============================================
 
-                updated_at = ?
+                await cursor.execute(
+                    """
+                    UPDATE accounts
 
-            WHERE guild_id = ?
-            AND user_id = ?
-            """,
-            (
-                float(reward),
-                current,
-                guild_id,
-                user_id
-            )
-        )
+                    SET
+                        balance =
+                            balance + %s,
 
-        # ================================================
-        # REGISTRAR TRANSACCIÓN
-        # ================================================
+                        updated_at = %s
 
-        await db.execute(
-            """
-            INSERT INTO transactions (
-                guild_id,
-                from_user_id,
-                to_user_id,
-                amount,
-                type,
-                description,
-                timestamp
-            )
+                    WHERE guild_id = %s
+                    AND user_id = %s
+                    """,
+                    (
+                        reward,
+                        current,
+                        guild_id,
+                        user_id
+                    )
+                )
 
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                guild_id,
-                None,
-                user_id,
-                float(reward),
-                "voice_activity",
-                f"Actividad en voz: {minutes} minuto(s)",
-                current
-            )
-        )
+                # ============================================
+                # TRANSACCIÓN
+                # ============================================
 
-        await db.commit()
+                await cursor.execute(
+                    """
+                    INSERT INTO transactions (
+                        guild_id,
+                        from_user_id,
+                        to_user_id,
+                        amount,
+                        type,
+                        description,
+                        timestamp
+                    )
+
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    )
+                    """,
+                    (
+                        guild_id,
+                        None,
+                        user_id,
+                        reward,
+                        "voice_activity",
+                        f"Actividad en voz: {minutes} minuto(s)",
+                        current
+                    )
+                )
 
     return reward
+
+
 # ============================================================
 # COMPROBAR ACTIVIDAD
 # ============================================================
@@ -1159,24 +1345,17 @@ def user_counts_for_voice(
 ):
 
     if member.bot:
-
         return False
 
     voice_state = member.voice
 
     if voice_state is None:
-
         return False
 
     channel = voice_state.channel
 
     if channel is None:
-
         return False
-
-    # ========================================================
-    # AFK
-    # ========================================================
 
     if (
         VOICE_IGNORE_AFK
@@ -1187,20 +1366,12 @@ def user_counts_for_voice(
 
         return False
 
-    # ========================================================
-    # DEAFEN
-    # ========================================================
-
     if (
         voice_state.deaf
         or voice_state.self_deaf
     ):
 
         return False
-
-    # ========================================================
-    # OTRAS PERSONAS
-    # ========================================================
 
     if VOICE_REQUIRE_OTHERS:
 
@@ -1243,7 +1414,7 @@ async def process_voice_sessions():
 
         FROM voice_sessions
 
-        WHERE guild_id = ?
+        WHERE guild_id = %s
         """,
         (
             GUILD_ID,
@@ -1264,10 +1435,6 @@ async def process_voice_sessions():
             user_id
         )
 
-        # ====================================================
-        # YA NO CUENTA
-        # ====================================================
-
         if (
             member is None
             or not user_counts_for_voice(
@@ -1281,10 +1448,6 @@ async def process_voice_sessions():
             )
 
             continue
-
-        # ====================================================
-        # SIGUE ACTIVO
-        # ====================================================
 
         last_paid_at = parse_time(
             last_paid_at_value
@@ -1320,10 +1483,6 @@ async def process_voice_sessions():
             seconds_to_process
         )
 
-        # ====================================================
-        # AVANZAR last_paid_at SOLO EL TIEMPO PAGADO
-        # ====================================================
-
         new_last_paid = (
             last_paid_at.timestamp()
             + seconds_to_process
@@ -1340,15 +1499,13 @@ async def process_voice_sessions():
             """
             UPDATE voice_sessions
 
-            SET last_paid_at = ?
+            SET last_paid_at = %s
 
-            WHERE guild_id = ?
-            AND user_id = ?
+            WHERE guild_id = %s
+            AND user_id = %s
             """,
             (
-                iso(
-                    new_last_paid_dt
-                ),
+                new_last_paid_dt,
                 GUILD_ID,
                 user_id
             )
@@ -1377,9 +1534,7 @@ async def voice_activity_loop():
         flush=True
     )
 
-    await asyncio.sleep(
-        10
-    )
+    await asyncio.sleep(10)
 
     while True:
 
@@ -1467,9 +1622,7 @@ async def economy_on_voice_state_update(
             member.id
         )
 
-        if user_counts_for_voice(
-            member
-        ):
+        if user_counts_for_voice(member):
 
             await start_voice_session(
                 member.guild.id,
@@ -1484,9 +1637,7 @@ async def economy_on_voice_state_update(
 
     if not was_in_voice and is_in_voice:
 
-        if user_counts_for_voice(
-            member
-        ):
+        if user_counts_for_voice(member):
 
             await start_voice_session(
                 member.guild.id,
@@ -1503,15 +1654,11 @@ async def economy_on_voice_state_update(
 
         valid_before = (
             before.channel is not None
-            and user_counts_for_voice(
-                member
-            )
+            and user_counts_for_voice(member)
         )
 
         valid_after = (
-            user_counts_for_voice(
-                member
-            )
+            user_counts_for_voice(member)
         )
 
         if (
@@ -1579,8 +1726,8 @@ async def economy_balance(
 
         FROM voice_activity
 
-        WHERE guild_id = ?
-        AND user_id = ?
+        WHERE guild_id = %s
+        AND user_id = %s
         """,
         (
             interaction.guild.id,
@@ -1592,6 +1739,7 @@ async def economy_balance(
     if voice_stats:
 
         total_seconds = voice_stats[0]
+
         total_earned = decimal_value(
             voice_stats[1]
         )
@@ -1599,9 +1747,8 @@ async def economy_balance(
     else:
 
         total_seconds = 0
-        total_earned = Decimal(
-            "0"
-        )
+
+        total_earned = Decimal("0")
 
     embed = discord.Embed(
         title="💰 Saldo",
@@ -1616,9 +1763,7 @@ async def economy_balance(
 
     embed.add_field(
         name=f"{CURRENCY_SYMBOL} Saldo",
-        value=format_money(
-            balance
-        ),
+        value=format_money(balance),
         inline=False
     )
 
@@ -1768,7 +1913,7 @@ async def economy_leaderboard(
 
         FROM accounts
 
-        WHERE guild_id = ?
+        WHERE guild_id = %s
 
         ORDER BY balance DESC
 
@@ -1805,10 +1950,8 @@ async def economy_leaderboard(
         start=1
     ):
 
-        member = (
-            interaction.guild.get_member(
-                user_id
-            )
+        member = interaction.guild.get_member(
+            user_id
         )
 
         if member is None:
@@ -1831,9 +1974,7 @@ async def economy_leaderboard(
 
     embed = discord.Embed(
         title="🏆 Ranking económico",
-        description="\n".join(
-            ranking
-        ),
+        description="\n".join(ranking),
         color=discord.Color.gold(),
         timestamp=now()
     )
@@ -1879,7 +2020,8 @@ async def economy_info(
     embed.add_field(
         name="🎙️ Recompensa",
         value=(
-            f"{format_money(VOICE_REWARD_PER_MINUTE)} / minuto"
+            f"{format_money(VOICE_REWARD_PER_MINUTE)} "
+            f"/ minuto"
         ),
         inline=True
     )
@@ -1966,9 +2108,7 @@ async def economy_on_ready():
 
                     continue
 
-                if user_counts_for_voice(
-                    member
-                ):
+                if user_counts_for_voice(member):
 
                     existing = await db_execute(
                         """
@@ -1976,8 +2116,8 @@ async def economy_on_ready():
 
                         FROM voice_sessions
 
-                        WHERE guild_id = ?
-                        AND user_id = ?
+                        WHERE guild_id = %s
+                        AND user_id = %s
                         """,
                         (
                             GUILD_ID,
@@ -1988,23 +2128,20 @@ async def economy_on_ready():
 
                     if existing:
 
-                        # El bot estuvo apagado.
-                        # No regalamos ese tiempo.
-
                         await db_execute(
                             """
                             UPDATE voice_sessions
 
                             SET
-                                joined_at = ?,
-                                last_paid_at = ?
+                                joined_at = %s,
+                                last_paid_at = %s
 
-                            WHERE guild_id = ?
-                            AND user_id = ?
+                            WHERE guild_id = %s
+                            AND user_id = %s
                             """,
                             (
-                                iso(),
-                                iso(),
+                                now(),
+                                now(),
                                 GUILD_ID,
                                 member.id
                             )

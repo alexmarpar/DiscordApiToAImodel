@@ -1,7 +1,9 @@
 import os
 from datetime import datetime, timezone, timedelta
 
-import aiosqlite
+import psycopg
+from psycopg_pool import AsyncConnectionPool
+
 import discord
 from discord import app_commands
 
@@ -11,10 +13,14 @@ from discord import app_commands
 # ============================================================
 
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
-DB = "stats.db"
+
+DATABASE_URL = os.getenv("DATABASE_STATS_URL")
 
 if GUILD_ID == 0:
     raise RuntimeError("GUILD_ID no está definido")
+
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_STATS_URL no está definido")
 
 GUILD = discord.Object(id=GUILD_ID)
 
@@ -25,6 +31,7 @@ GUILD = discord.Object(id=GUILD_ID)
 
 _client = None
 _initialized = False
+_pool = None
 
 
 # ============================================================
@@ -36,6 +43,7 @@ def now():
 
 
 def iso(dt=None):
+
     if dt is None:
         dt = now()
 
@@ -43,16 +51,22 @@ def iso(dt=None):
 
 
 def parse_time(value):
+
     if not value:
         return None
 
+    if isinstance(value, datetime):
+        return value
+
     try:
         return datetime.fromisoformat(value)
+
     except Exception:
         return None
 
 
 def format_duration(seconds):
+
     seconds = int(max(0, seconds))
 
     days, seconds = divmod(seconds, 86400)
@@ -76,31 +90,69 @@ def format_duration(seconds):
     return " ".join(parts)
 
 
+# ============================================================
+# SQLITE -> POSTGRES
+# ============================================================
+
+def sqlite_to_postgres(query):
+    """
+    Convierte placeholders:
+
+        ?
+        ?, ?
+        ?, ?, ?
+
+    en:
+
+        %s
+        %s, %s
+        %s, %s, %s
+
+    Esto permite mantener las consultas originales
+    sin tener que reescribir todos los placeholders.
+    """
+
+    return query.replace("?", "%s")
+
+
+# ============================================================
+# DATABASE EXECUTE
+# ============================================================
+
 async def db_execute(
     query,
     params=(),
     fetch=False,
     fetchall=False
 ):
-    async with aiosqlite.connect(DB) as db:
 
-        cursor = await db.execute(
-            query,
-            params
+    global _pool
+
+    if _pool is None:
+        raise RuntimeError(
+            "La conexión a Neon todavía no está inicializada"
         )
 
-        if fetch:
-            result = await cursor.fetchone()
+    query = sqlite_to_postgres(query)
 
-        elif fetchall:
-            result = await cursor.fetchall()
+    async with _pool.connection() as conn:
 
-        else:
-            result = None
+        async with conn.cursor() as cursor:
 
-        await db.commit()
+            await cursor.execute(
+                query,
+                params
+            )
 
-        return result
+            if fetch:
+
+                return await cursor.fetchone()
+
+            if fetchall:
+
+                return await cursor.fetchall()
+
+            return None
 
 
 # ============================================================
@@ -109,231 +161,253 @@ async def db_execute(
 
 async def init_db():
 
-    print("[STATS][DB] Inicializando...", flush=True)
+    global _pool
 
-    async with aiosqlite.connect(DB) as db:
+    print(
+        "[STATS][DB] Conectando a Neon...",
+        flush=True
+    )
 
-        # ----------------------------------------------------
-        # USUARIOS
-        # ----------------------------------------------------
+    _pool = AsyncConnectionPool(
+        conninfo=DATABASE_URL,
+        min_size=1,
+        max_size=5,
+        open=False
+    )
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
+    await _pool.open()
 
-                username TEXT,
-                display_name TEXT,
+    print(
+        "[STATS][DB] Pool de conexiones creado",
+        flush=True
+    )
 
-                created_at TEXT,
-                joined_at TEXT,
+    async with _pool.connection() as conn:
 
-                first_seen TEXT,
-                last_seen TEXT,
+        async with conn.cursor() as db:
 
-                messages INTEGER DEFAULT 0,
-                characters INTEGER DEFAULT 0,
+            # ------------------------------------------------
+            # USUARIOS
+            # ------------------------------------------------
 
-                attachments INTEGER DEFAULT 0,
-                links INTEGER DEFAULT 0,
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
 
-                reactions_added INTEGER DEFAULT 0,
+                    username TEXT,
+                    display_name TEXT,
 
-                messages_deleted INTEGER DEFAULT 0,
-                messages_edited INTEGER DEFAULT 0,
+                    created_at TEXT,
+                    joined_at TEXT,
 
-                typing_events INTEGER DEFAULT 0,
+                    first_seen TEXT,
+                    last_seen TEXT,
 
-                voice_sessions INTEGER DEFAULT 0,
-                voice_seconds INTEGER DEFAULT 0,
+                    messages BIGINT DEFAULT 0,
+                    characters BIGINT DEFAULT 0,
 
-                online_seconds INTEGER DEFAULT 0,
-                idle_seconds INTEGER DEFAULT 0,
+                    attachments BIGINT DEFAULT 0,
+                    links BIGINT DEFAULT 0,
 
-                last_voice_channel_id INTEGER,
-                last_text_channel_id INTEGER,
+                    reactions_added BIGINT DEFAULT 0,
 
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """)
+                    messages_deleted BIGINT DEFAULT 0,
+                    messages_edited BIGINT DEFAULT 0,
 
-        # ----------------------------------------------------
-        # MENSAJES
-        # ----------------------------------------------------
+                    typing_events BIGINT DEFAULT 0,
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    voice_sessions BIGINT DEFAULT 0,
+                    voice_seconds BIGINT DEFAULT 0,
 
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
+                    online_seconds BIGINT DEFAULT 0,
+                    idle_seconds BIGINT DEFAULT 0,
 
-                timestamp TEXT NOT NULL,
+                    last_voice_channel_id BIGINT,
+                    last_text_channel_id BIGINT,
 
-                characters INTEGER DEFAULT 0,
-                attachments INTEGER DEFAULT 0,
-                links INTEGER DEFAULT 0
-            )
-        """)
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            """)
 
-        # ----------------------------------------------------
-        # EVENTOS DE MIEMBROS
-        # ----------------------------------------------------
+            # ------------------------------------------------
+            # MENSAJES
+            # ------------------------------------------------
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS member_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id BIGSERIAL PRIMARY KEY,
 
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    channel_id BIGINT NOT NULL,
 
-                event TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
 
-                timestamp TEXT NOT NULL
-            )
-        """)
+                    characters BIGINT DEFAULT 0,
+                    attachments BIGINT DEFAULT 0,
+                    links BIGINT DEFAULT 0
+                )
+            """)
 
-        # ----------------------------------------------------
-        # VOZ
-        # ----------------------------------------------------
+            # ------------------------------------------------
+            # EVENTOS DE MIEMBROS
+            # ------------------------------------------------
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS voice_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS member_events (
+                    id BIGSERIAL PRIMARY KEY,
 
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
 
-                channel_id INTEGER NOT NULL,
+                    event TEXT NOT NULL,
 
-                joined_at TEXT NOT NULL,
-                left_at TEXT,
+                    timestamp TEXT NOT NULL
+                )
+            """)
 
-                duration_seconds INTEGER DEFAULT 0
-            )
-        """)
+            # ------------------------------------------------
+            # VOZ
+            # ------------------------------------------------
 
-        # ----------------------------------------------------
-        # PRESENCIA
-        # ----------------------------------------------------
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS voice_sessions (
+                    id BIGSERIAL PRIMARY KEY,
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS presence_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
 
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
+                    channel_id BIGINT NOT NULL,
 
-                status TEXT NOT NULL,
+                    joined_at TEXT NOT NULL,
+                    left_at TEXT,
 
-                started_at TEXT NOT NULL,
-                ended_at TEXT,
+                    duration_seconds BIGINT DEFAULT 0
+                )
+            """)
 
-                duration_seconds INTEGER DEFAULT 0
-            )
-        """)
+            # ------------------------------------------------
+            # PRESENCIA
+            # ------------------------------------------------
 
-        # ----------------------------------------------------
-        # EVENTOS DE PRESENCIA
-        # ----------------------------------------------------
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS presence_sessions (
+                    id BIGSERIAL PRIMARY KEY,
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS presence_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
 
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
 
-                status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
 
-                timestamp TEXT NOT NULL
-            )
-        """)
+                    duration_seconds BIGINT DEFAULT 0
+                )
+            """)
 
-        # ----------------------------------------------------
-        # REACCIONES
-        # ----------------------------------------------------
+            # ------------------------------------------------
+            # EVENTOS DE PRESENCIA
+            # ------------------------------------------------
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS reactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS presence_events (
+                    id BIGSERIAL PRIMARY KEY,
 
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
 
-                channel_id INTEGER,
-                message_id INTEGER,
+                    status TEXT NOT NULL,
 
-                emoji TEXT,
+                    timestamp TEXT NOT NULL
+                )
+            """)
 
-                timestamp TEXT NOT NULL
-            )
-        """)
+            # ------------------------------------------------
+            # REACCIONES
+            # ------------------------------------------------
 
-        # ----------------------------------------------------
-        # EDICIONES
-        # ----------------------------------------------------
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS reactions (
+                    id BIGSERIAL PRIMARY KEY,
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS message_edits (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
 
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
+                    channel_id BIGINT,
+                    message_id BIGINT,
 
-                channel_id INTEGER,
-                message_id INTEGER,
+                    emoji TEXT,
 
-                timestamp TEXT NOT NULL
-            )
-        """)
+                    timestamp TEXT NOT NULL
+                )
+            """)
 
-        # ----------------------------------------------------
-        # BORRADOS
-        # ----------------------------------------------------
+            # ------------------------------------------------
+            # EDICIONES
+            # ------------------------------------------------
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS message_deletions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS message_edits (
+                    id BIGSERIAL PRIMARY KEY,
 
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER,
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
 
-                channel_id INTEGER,
-                message_id INTEGER,
+                    channel_id BIGINT,
+                    message_id BIGINT,
 
-                timestamp TEXT NOT NULL
-            )
-        """)
+                    timestamp TEXT NOT NULL
+                )
+            """)
 
-        # ----------------------------------------------------
-        # ÍNDICES
-        # ----------------------------------------------------
+            # ------------------------------------------------
+            # BORRADOS
+            # ------------------------------------------------
 
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_messages_guild_user
-            ON messages(guild_id, user_id)
-        """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS message_deletions (
+                    id BIGSERIAL PRIMARY KEY,
 
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_messages_timestamp
-            ON messages(timestamp)
-        """)
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT,
 
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_voice_guild_user
-            ON voice_sessions(guild_id, user_id)
-        """)
+                    channel_id BIGINT,
+                    message_id BIGINT,
 
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_presence_guild_user
-            ON presence_sessions(guild_id, user_id)
-        """)
+                    timestamp TEXT NOT NULL
+                )
+            """)
 
-        await db.commit()
+            # ------------------------------------------------
+            # ÍNDICES
+            # ------------------------------------------------
 
-    print("[STATS][DB] Base de datos lista", flush=True)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_guild_user
+                ON messages(guild_id, user_id)
+            """)
+
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_timestamp
+                ON messages(timestamp)
+            """)
+
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_voice_guild_user
+                ON voice_sessions(guild_id, user_id)
+            """)
+
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_presence_guild_user
+                ON presence_sessions(guild_id, user_id)
+            """)
+
+    print(
+        "[STATS][DB] Base de datos Neon lista",
+        flush=True
+    )
 
 
 # ============================================================
@@ -344,8 +418,17 @@ async def ensure_user(member):
 
     current = now()
 
-    created_at = getattr(member, "created_at", current)
-    joined_at = getattr(member, "joined_at", None)
+    created_at = getattr(
+        member,
+        "created_at",
+        current
+    )
+
+    joined_at = getattr(
+        member,
+        "joined_at",
+        None
+    )
 
     await db_execute("""
         INSERT INTO users (
@@ -362,9 +445,9 @@ async def ensure_user(member):
 
         ON CONFLICT(guild_id, user_id)
         DO UPDATE SET
-            username = excluded.username,
-            display_name = excluded.display_name,
-            last_seen = excluded.last_seen
+            username = EXCLUDED.username,
+            display_name = EXCLUDED.display_name,
+            last_seen = EXCLUDED.last_seen
     """, (
         member.guild.id,
         member.id,
@@ -441,21 +524,28 @@ async def stats_on_ready():
     if _initialized:
         return
 
-    print("[STATS] Inicializando módulo...", flush=True)
+    print(
+        "[STATS] Inicializando módulo...",
+        flush=True
+    )
 
     await init_db()
 
     guild = _client.get_guild(GUILD_ID)
 
     if guild is None:
+
         print(
-            f"[STATS] ERROR: No se encontró el servidor {GUILD_ID}",
+            f"[STATS] ERROR: "
+            f"No se encontró el servidor {GUILD_ID}",
             flush=True
         )
+
         return
 
     print(
-        f"[STATS] Sincronizando {len(guild.members)} usuarios...",
+        f"[STATS] Sincronizando "
+        f"{len(guild.members)} usuarios...",
         flush=True
     )
 
@@ -465,12 +555,14 @@ async def stats_on_ready():
             continue
 
         try:
+
             await ensure_user(member)
 
         except Exception as e:
 
             print(
-                f"[STATS] Error usuario {member.id}: {e}",
+                f"[STATS] Error usuario "
+                f"{member.id}: {e}",
                 flush=True
             )
 
@@ -518,9 +610,12 @@ async def stats_on_ready():
                 await db_execute("""
                     UPDATE users
                     SET
-                        voice_sessions = voice_sessions + 1,
+                        voice_sessions =
+                            voice_sessions + 1,
+
                         last_voice_channel_id = ?,
                         last_seen = ?
+
                     WHERE guild_id = ?
                     AND user_id = ?
                 """, (
@@ -531,14 +626,19 @@ async def stats_on_ready():
                 ))
 
                 print(
-                    f"[STATS][VOICE] Sesión recuperada: "
-                    f"{member} -> {voice_channel.name}",
+                    f"[STATS][VOICE] "
+                    f"Sesión recuperada: "
+                    f"{member} -> "
+                    f"{voice_channel.name}",
                     flush=True
                 )
 
     _initialized = True
 
-    print("[STATS] Módulo listo", flush=True)
+    print(
+        "[STATS] Módulo listo",
+        flush=True
+    )
 
 
 # ============================================================
@@ -559,7 +659,11 @@ async def stats_on_message(message):
     content = message.content or ""
 
     characters = len(content)
-    attachments = len(message.attachments)
+
+    attachments = len(
+        message.attachments
+    )
+
     links = (
         content.count("http://") +
         content.count("https://")
@@ -567,7 +671,9 @@ async def stats_on_message(message):
 
     try:
 
-        await ensure_user(message.author)
+        await ensure_user(
+            message.author
+        )
 
         await db_execute("""
             INSERT INTO messages (
@@ -599,6 +705,7 @@ async def stats_on_message(message):
                 links = links + ?,
                 last_seen = ?,
                 last_text_channel_id = ?
+
             WHERE guild_id = ?
             AND user_id = ?
         """, (
@@ -632,7 +739,10 @@ async def stats_on_message(message):
 # MESSAGE EDIT
 # ============================================================
 
-async def stats_on_message_edit(before, after):
+async def stats_on_message_edit(
+    before,
+    after
+):
 
     if after.author.bot:
         return
@@ -665,8 +775,11 @@ async def stats_on_message_edit(before, after):
         await db_execute("""
             UPDATE users
             SET
-                messages_edited = messages_edited + 1,
+                messages_edited =
+                    messages_edited + 1,
+
                 last_seen = ?
+
             WHERE guild_id = ?
             AND user_id = ?
         """, (
@@ -720,7 +833,10 @@ async def stats_on_message_delete(message):
 
         await db_execute("""
             UPDATE users
-            SET messages_deleted = messages_deleted + 1
+            SET
+                messages_deleted =
+                    messages_deleted + 1
+
             WHERE guild_id = ?
             AND user_id = ?
         """, (
@@ -749,12 +865,16 @@ async def stats_on_raw_reaction_add(payload):
     if payload.guild_id != GUILD_ID:
         return
 
-    guild = _client.get_guild(payload.guild_id)
+    guild = _client.get_guild(
+        payload.guild_id
+    )
 
     if guild is None:
         return
 
-    member = guild.get_member(payload.user_id)
+    member = guild.get_member(
+        payload.user_id
+    )
 
     if member is None or member.bot:
         return
@@ -785,8 +905,11 @@ async def stats_on_raw_reaction_add(payload):
         await db_execute("""
             UPDATE users
             SET
-                reactions_added = reactions_added + 1,
+                reactions_added =
+                    reactions_added + 1,
+
                 last_seen = ?
+
             WHERE guild_id = ?
             AND user_id = ?
         """, (
@@ -808,7 +931,11 @@ async def stats_on_raw_reaction_add(payload):
 # TYPING
 # ============================================================
 
-async def stats_on_typing(channel, user, when):
+async def stats_on_typing(
+    channel,
+    user,
+    when
+):
 
     if user.bot:
         return
@@ -826,9 +953,12 @@ async def stats_on_typing(channel, user, when):
         await db_execute("""
             UPDATE users
             SET
-                typing_events = typing_events + 1,
+                typing_events =
+                    typing_events + 1,
+
                 last_seen = ?,
                 last_text_channel_id = ?
+
             WHERE guild_id = ?
             AND user_id = ?
         """, (
@@ -880,7 +1010,8 @@ async def stats_on_member_join(member):
 
         print(
             f"[STATS][MEMBER] JOIN "
-            f"{member} -> {member.guild.name}",
+            f"{member} -> "
+            f"{member.guild.name}",
             flush=True
         )
 
@@ -921,7 +1052,8 @@ async def stats_on_member_remove(member):
 
         print(
             f"[STATS][MEMBER] LEAVE "
-            f"{member} -> {member.guild.name}",
+            f"{member} -> "
+            f"{member.guild.name}",
             flush=True
         )
 
@@ -938,7 +1070,11 @@ async def stats_on_member_remove(member):
 # VOICE
 # ============================================================
 
-async def stats_on_voice_state_update(member, before, after):
+async def stats_on_voice_state_update(
+    member,
+    before,
+    after
+):
 
     if member.bot:
         return
@@ -957,7 +1093,10 @@ async def stats_on_voice_state_update(member, before, after):
         # JOIN
         # ----------------------------------------------------
 
-        if before.channel is None and after.channel is not None:
+        if (
+            before.channel is None
+            and after.channel is not None
+        ):
 
             await db_execute("""
                 INSERT INTO voice_sessions (
@@ -977,9 +1116,12 @@ async def stats_on_voice_state_update(member, before, after):
             await db_execute("""
                 UPDATE users
                 SET
-                    voice_sessions = voice_sessions + 1,
+                    voice_sessions =
+                        voice_sessions + 1,
+
                     last_seen = ?,
                     last_voice_channel_id = ?
+
                 WHERE guild_id = ?
                 AND user_id = ?
             """, (
@@ -991,7 +1133,8 @@ async def stats_on_voice_state_update(member, before, after):
 
             print(
                 f"[STATS][VOICE] JOIN "
-                f"{member} -> {after.channel.name}",
+                f"{member} -> "
+                f"{after.channel.name}",
                 flush=True
             )
 
@@ -999,7 +1142,10 @@ async def stats_on_voice_state_update(member, before, after):
         # LEAVE
         # ----------------------------------------------------
 
-        elif before.channel is not None and after.channel is None:
+        elif (
+            before.channel is not None
+            and after.channel is None
+        ):
 
             current = now()
 
@@ -1020,13 +1166,18 @@ async def stats_on_voice_state_update(member, before, after):
 
                 session_id, joined_at = session
 
-                joined = parse_time(joined_at)
+                joined = parse_time(
+                    joined_at
+                )
 
                 duration = 0
 
                 if joined:
+
                     duration = int(
-                        (current - joined).total_seconds()
+                        (
+                            current - joined
+                        ).total_seconds()
                     )
 
                 await db_execute("""
@@ -1034,6 +1185,7 @@ async def stats_on_voice_state_update(member, before, after):
                     SET
                         left_at = ?,
                         duration_seconds = ?
+
                     WHERE id = ?
                 """, (
                     iso(current),
@@ -1044,8 +1196,11 @@ async def stats_on_voice_state_update(member, before, after):
                 await db_execute("""
                     UPDATE users
                     SET
-                        voice_seconds = voice_seconds + ?,
+                        voice_seconds =
+                            voice_seconds + ?,
+
                         last_seen = ?
+
                     WHERE guild_id = ?
                     AND user_id = ?
                 """, (
@@ -1057,7 +1212,8 @@ async def stats_on_voice_state_update(member, before, after):
 
             print(
                 f"[STATS][VOICE] LEAVE "
-                f"{member} <- {before.channel.name}",
+                f"{member} <- "
+                f"{before.channel.name}",
                 flush=True
             )
 
@@ -1090,13 +1246,18 @@ async def stats_on_voice_state_update(member, before, after):
 
                 session_id, joined_at = session
 
-                joined = parse_time(joined_at)
+                joined = parse_time(
+                    joined_at
+                )
 
                 duration = 0
 
                 if joined:
+
                     duration = int(
-                        (current - joined).total_seconds()
+                        (
+                            current - joined
+                        ).total_seconds()
                     )
 
                 await db_execute("""
@@ -1104,6 +1265,7 @@ async def stats_on_voice_state_update(member, before, after):
                     SET
                         left_at = ?,
                         duration_seconds = ?
+
                     WHERE id = ?
                 """, (
                     iso(current),
@@ -1114,9 +1276,12 @@ async def stats_on_voice_state_update(member, before, after):
                 await db_execute("""
                     UPDATE users
                     SET
-                        voice_seconds = voice_seconds + ?,
+                        voice_seconds =
+                            voice_seconds + ?,
+
                         last_seen = ?,
                         last_voice_channel_id = ?
+
                     WHERE guild_id = ?
                     AND user_id = ?
                 """, (
@@ -1179,7 +1344,10 @@ async def stats_on_voice_state_update(member, before, after):
 # PRESENCE
 # ============================================================
 
-async def stats_on_presence_update(before, after):
+async def stats_on_presence_update(
+    before,
+    after
+):
 
     if after.bot:
         return
@@ -1195,8 +1363,13 @@ async def stats_on_presence_update(before, after):
 
     try:
 
-        before_status = str(before.status)
-        after_status = str(after.status)
+        before_status = str(
+            before.status
+        )
+
+        after_status = str(
+            after.status
+        )
 
         if before_status == after_status:
             return
@@ -1220,13 +1393,18 @@ async def stats_on_presence_update(before, after):
 
             session_id, started_at, status = previous
 
-            started = parse_time(started_at)
+            started = parse_time(
+                started_at
+            )
 
             duration = 0
 
             if started:
+
                 duration = int(
-                    (current - started).total_seconds()
+                    (
+                        current - started
+                    ).total_seconds()
                 )
 
             await db_execute("""
@@ -1234,6 +1412,7 @@ async def stats_on_presence_update(before, after):
                 SET
                     ended_at = ?,
                     duration_seconds = ?
+
                 WHERE id = ?
             """, (
                 iso(current),
@@ -1245,8 +1424,10 @@ async def stats_on_presence_update(before, after):
 
                 await db_execute("""
                     UPDATE users
-                    SET online_seconds =
-                        online_seconds + ?
+                    SET
+                        online_seconds =
+                            online_seconds + ?
+
                     WHERE guild_id = ?
                     AND user_id = ?
                 """, (
@@ -1259,8 +1440,10 @@ async def stats_on_presence_update(before, after):
 
                 await db_execute("""
                     UPDATE users
-                    SET idle_seconds =
-                        idle_seconds + ?
+                    SET
+                        idle_seconds =
+                            idle_seconds + ?
+
                     WHERE guild_id = ?
                     AND user_id = ?
                 """, (
@@ -1323,7 +1506,9 @@ async def stats_on_presence_update(before, after):
     name="stats",
     description="Estadísticas completas del servidor"
 )
-async def stats(interaction: discord.Interaction):
+async def stats(
+    interaction: discord.Interaction
+):
 
     print(
         "[STATS] /stats recibido",
@@ -1362,7 +1547,9 @@ async def stats(interaction: discord.Interaction):
             SELECT COUNT(*)
             FROM messages
             WHERE guild_id = ?
-        """, (guild.id,), fetch=True)
+        """, (
+            guild.id,
+        ), fetch=True)
 
         total_messages = result[0]
 
@@ -1370,7 +1557,9 @@ async def stats(interaction: discord.Interaction):
             SELECT COALESCE(SUM(characters), 0)
             FROM messages
             WHERE guild_id = ?
-        """, (guild.id,), fetch=True)
+        """, (
+            guild.id,
+        ), fetch=True)
 
         total_characters = result[0]
 
@@ -1381,7 +1570,10 @@ async def stats(interaction: discord.Interaction):
             AND timestamp >= ?
         """, (
             guild.id,
-            iso(now() - timedelta(days=7))
+            iso(
+                now() -
+                timedelta(days=7)
+            )
         ), fetch=True)
 
         weekly_messages = result[0]
@@ -1393,7 +1585,10 @@ async def stats(interaction: discord.Interaction):
             AND timestamp >= ?
         """, (
             guild.id,
-            iso(now() - timedelta(days=30))
+            iso(
+                now() -
+                timedelta(days=30)
+            )
         ), fetch=True)
 
         monthly_messages = result[0]
@@ -1403,10 +1598,15 @@ async def stats(interaction: discord.Interaction):
         # ====================================================
 
         result = await db_execute("""
-            SELECT COALESCE(SUM(duration_seconds), 0)
+            SELECT COALESCE(
+                SUM(duration_seconds),
+                0
+            )
             FROM voice_sessions
             WHERE guild_id = ?
-        """, (guild.id,), fetch=True)
+        """, (
+            guild.id,
+        ), fetch=True)
 
         total_voice = result[0]
 
@@ -1419,7 +1619,9 @@ async def stats(interaction: discord.Interaction):
             FROM users
             WHERE guild_id = ?
             AND messages > 0
-        """, (guild.id,), fetch=True)
+        """, (
+            guild.id,
+        ), fetch=True)
 
         active_users = result[0]
 
@@ -1437,7 +1639,9 @@ async def stats(interaction: discord.Interaction):
             WHERE guild_id = ?
             ORDER BY messages DESC
             LIMIT 10
-        """, (guild.id,), fetchall=True)
+        """, (
+            guild.id,
+        ), fetchall=True)
 
         # ====================================================
         # TOP VOZ
@@ -1451,7 +1655,9 @@ async def stats(interaction: discord.Interaction):
             WHERE guild_id = ?
             ORDER BY voice_seconds DESC
             LIMIT 10
-        """, (guild.id,), fetchall=True)
+        """, (
+            guild.id,
+        ), fetchall=True)
 
         # ====================================================
         # TOP CANALES
@@ -1466,7 +1672,9 @@ async def stats(interaction: discord.Interaction):
             GROUP BY channel_id
             ORDER BY total DESC
             LIMIT 10
-        """, (guild.id,), fetchall=True)
+        """, (
+            guild.id,
+        ), fetchall=True)
 
         # ====================================================
         # HORA
@@ -1474,14 +1682,20 @@ async def stats(interaction: discord.Interaction):
 
         busiest_hour = await db_execute("""
             SELECT
-                strftime('%H', timestamp),
+                EXTRACT(
+                    HOUR FROM timestamp::timestamptz
+                )::INTEGER,
                 COUNT(*)
             FROM messages
             WHERE guild_id = ?
-            GROUP BY strftime('%H', timestamp)
+            GROUP BY EXTRACT(
+                HOUR FROM timestamp::timestamptz
+            )
             ORDER BY COUNT(*) DESC
             LIMIT 1
-        """, (guild.id,), fetch=True)
+        """, (
+            guild.id,
+        ), fetch=True)
 
         # ====================================================
         # DÍA
@@ -1489,14 +1703,20 @@ async def stats(interaction: discord.Interaction):
 
         busiest_day = await db_execute("""
             SELECT
-                strftime('%w', timestamp),
+                EXTRACT(
+                    DOW FROM timestamp::timestamptz
+                )::INTEGER,
                 COUNT(*)
             FROM messages
             WHERE guild_id = ?
-            GROUP BY strftime('%w', timestamp)
+            GROUP BY EXTRACT(
+                DOW FROM timestamp::timestamptz
+            )
             ORDER BY COUNT(*) DESC
             LIMIT 1
-        """, (guild.id,), fetch=True)
+        """, (
+            guild.id,
+        ), fetch=True)
 
         # ====================================================
         # ENTRADAS / SALIDAS
@@ -1507,7 +1727,9 @@ async def stats(interaction: discord.Interaction):
             FROM member_events
             WHERE guild_id = ?
             AND event = 'join'
-        """, (guild.id,), fetch=True)
+        """, (
+            guild.id,
+        ), fetch=True)
 
         joins = result[0]
 
@@ -1516,7 +1738,9 @@ async def stats(interaction: discord.Interaction):
             FROM member_events
             WHERE guild_id = ?
             AND event = 'leave'
-        """, (guild.id,), fetch=True)
+        """, (
+            guild.id,
+        ), fetch=True)
 
         leaves = result[0]
 
@@ -1525,7 +1749,10 @@ async def stats(interaction: discord.Interaction):
         # ====================================================
 
         embed = discord.Embed(
-            title=f"📊 Estadísticas globales — {guild.name}",
+            title=(
+                f"📊 Estadísticas globales — "
+                f"{guild.name}"
+            ),
             description=(
                 "Estadísticas recopiladas por el bot "
                 "sobre la actividad del servidor."
@@ -1584,7 +1811,9 @@ async def stats(interaction: discord.Interaction):
 
         embed.add_field(
             name="🎙️ Tiempo en voz",
-            value=format_duration(total_voice),
+            value=format_duration(
+                total_voice
+            ),
             inline=True
         )
 
@@ -1600,16 +1829,24 @@ async def stats(interaction: discord.Interaction):
             inline=True
         )
 
+        # ====================================================
+        # HORA MÁS ACTIVA
+        # ====================================================
+
         if busiest_hour:
 
             embed.add_field(
                 name="⏰ Hora más activa",
                 value=(
-                    f"{busiest_hour[0]}:00 "
+                    f"{busiest_hour[0]:02d}:00 "
                     f"({busiest_hour[1]:,} mensajes)"
                 ),
                 inline=False
             )
+
+        # ====================================================
+        # DÍA MÁS ACTIVO
+        # ====================================================
 
         if busiest_day:
 
@@ -1650,9 +1887,14 @@ async def stats(interaction: discord.Interaction):
                 messages,
                 characters,
                 voice_seconds
-            ) in enumerate(top_users, start=1):
+            ) in enumerate(
+                top_users,
+                start=1
+            ):
 
-                member = guild.get_member(user_id)
+                member = guild.get_member(
+                    user_id
+                )
 
                 if member:
 
@@ -1682,9 +1924,14 @@ async def stats(interaction: discord.Interaction):
             for position, (
                 user_id,
                 seconds
-            ) in enumerate(top_voice, start=1):
+            ) in enumerate(
+                top_voice,
+                start=1
+            ):
 
-                member = guild.get_member(user_id)
+                member = guild.get_member(
+                    user_id
+                )
 
                 if member:
 
@@ -1713,9 +1960,14 @@ async def stats(interaction: discord.Interaction):
             for position, (
                 channel_id,
                 total
-            ) in enumerate(top_channels, start=1):
+            ) in enumerate(
+                top_channels,
+                start=1
+            ):
 
-                channel = guild.get_channel(channel_id)
+                channel = guild.get_channel(
+                    channel_id
+                )
 
                 if channel:
 
@@ -1777,10 +2029,16 @@ async def stats(interaction: discord.Interaction):
 
 @app_commands.command(
     name="userstats",
-    description="Muestra las estadísticas completas de un usuario"
+    description=(
+        "Muestra las estadísticas completas "
+        "de un usuario"
+    )
 )
 @app_commands.describe(
-    member="Usuario del que quieres ver las estadísticas"
+    member=(
+        "Usuario del que quieres ver "
+        "las estadísticas"
+    )
 )
 async def userstats(
     interaction: discord.Interaction,
@@ -1790,7 +2048,8 @@ async def userstats(
     if interaction.guild is None:
 
         await interaction.response.send_message(
-            "❌ Solo puedes usar este comando en un servidor.",
+            "❌ Solo puedes usar este comando "
+            "en un servidor.",
             ephemeral=True
         )
 
@@ -1799,7 +2058,8 @@ async def userstats(
     if interaction.guild.id != GUILD_ID:
 
         await interaction.response.send_message(
-            "❌ Este comando no está disponible en este servidor.",
+            "❌ Este comando no está disponible "
+            "en este servidor.",
             ephemeral=True
         )
 
@@ -1811,7 +2071,8 @@ async def userstats(
     if member.bot:
 
         await interaction.response.send_message(
-            "❌ No se recopilan estadísticas de bots.",
+            "❌ No se recopilan estadísticas "
+            "de bots.",
             ephemeral=True
         )
 
@@ -1841,7 +2102,9 @@ async def userstats(
                 joined_at,
                 first_seen,
                 last_seen
+
             FROM users
+
             WHERE guild_id = ?
             AND user_id = ?
         """, (
@@ -1852,7 +2115,8 @@ async def userstats(
         if not data:
 
             await interaction.followup.send(
-                "No hay estadísticas para este usuario."
+                "No hay estadísticas "
+                "para este usuario."
             )
 
             return
@@ -1932,12 +2196,16 @@ async def userstats(
 
         favorite_hour = await db_execute("""
             SELECT
-                strftime('%H', timestamp),
+                EXTRACT(
+                    HOUR FROM timestamp::timestamptz
+                )::INTEGER,
                 COUNT(*)
             FROM messages
             WHERE guild_id = ?
             AND user_id = ?
-            GROUP BY strftime('%H', timestamp)
+            GROUP BY EXTRACT(
+                HOUR FROM timestamp::timestamptz
+            )
             ORDER BY COUNT(*) DESC
             LIMIT 1
         """, (
@@ -1948,14 +2216,20 @@ async def userstats(
         favorite_hour_text = "N/A"
 
         if favorite_hour:
-            favorite_hour_text = f"{favorite_hour[0]}:00"
+
+            favorite_hour_text = (
+                f"{favorite_hour[0]:02d}:00"
+            )
 
         # ----------------------------------------------------
         # EMBED
         # ----------------------------------------------------
 
         embed = discord.Embed(
-            title=f"👤 Estadísticas de {member.display_name}",
+            title=(
+                f"👤 Estadísticas de "
+                f"{member.display_name}"
+            ),
             color=discord.Color.blurple(),
             timestamp=now()
         )
@@ -2028,19 +2302,25 @@ async def userstats(
 
         embed.add_field(
             name="🔊 Tiempo en voz",
-            value=format_duration(voice_seconds),
+            value=format_duration(
+                voice_seconds
+            ),
             inline=True
         )
 
         embed.add_field(
             name="🟢 Tiempo online detectado",
-            value=format_duration(online_seconds),
+            value=format_duration(
+                online_seconds
+            ),
             inline=True
         )
 
         embed.add_field(
             name="💤 Tiempo idle detectado",
-            value=format_duration(idle_seconds),
+            value=format_duration(
+                idle_seconds
+            ),
             inline=True
         )
 
@@ -2064,7 +2344,9 @@ async def userstats(
 
         if joined_at:
 
-            joined = parse_time(joined_at)
+            joined = parse_time(
+                joined_at
+            )
 
             if joined:
 
@@ -2081,7 +2363,9 @@ async def userstats(
 
         if created_at:
 
-            created = parse_time(created_at)
+            created = parse_time(
+                created_at
+            )
 
             if created:
 
@@ -2093,7 +2377,9 @@ async def userstats(
 
         if last_seen:
 
-            last = parse_time(last_seen)
+            last = parse_time(
+                last_seen
+            )
 
             if last:
 
@@ -2131,10 +2417,16 @@ async def userstats(
 
         if roles:
 
-            roles_text = ", ".join(roles)
+            roles_text = ", ".join(
+                roles
+            )
 
             if len(roles_text) > 1000:
-                roles_text = roles_text[:997] + "..."
+
+                roles_text = (
+                    roles_text[:997] +
+                    "..."
+                )
 
             embed.add_field(
                 name="🏷️ Roles",
@@ -2161,7 +2453,8 @@ async def userstats(
         try:
 
             await interaction.followup.send(
-                "❌ Error generando las estadísticas.",
+                "❌ Error generando "
+                "las estadísticas.",
                 ephemeral=True
             )
 
@@ -2178,12 +2471,20 @@ def setup_stats(client):
     global _client
 
     if _client is not None:
-        print("[STATS] Módulo ya cargado", flush=True)
+
+        print(
+            "[STATS] Módulo ya cargado",
+            flush=True
+        )
+
         return
 
     _client = client
 
-    print("[STATS] Registrando módulo...", flush=True)
+    print(
+        "[STATS] Registrando módulo...",
+        flush=True
+    )
 
     # --------------------------------------------------------
     # COMANDOS
@@ -2253,4 +2554,7 @@ def setup_stats(client):
         "on_presence_update"
     )
 
-    print("[STATS] Módulo registrado correctamente", flush=True)
+    print(
+        "[STATS] Módulo registrado correctamente",
+        flush=True
+    )
