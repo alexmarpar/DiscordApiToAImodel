@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import discord
+from discord import app_commands
 from psycopg_pool import AsyncConnectionPool
 
 
@@ -57,7 +58,6 @@ CURRENCY_SYMBOL = os.getenv(
 
 _client = None
 _initialized = False
-
 _db_pool = None
 
 
@@ -66,16 +66,12 @@ _db_pool = None
 # ============================================================
 
 def now():
-    return datetime.now(
-        timezone.utc
-    )
+    return datetime.now(timezone.utc)
 
 
 def format_money(amount):
 
-    amount = Decimal(
-        str(amount)
-    )
+    amount = Decimal(str(amount))
 
     return (
         f"{CURRENCY_SYMBOL} "
@@ -84,7 +80,7 @@ def format_money(amount):
 
 
 # ============================================================
-# DATABASE
+# DATABASE EXECUTE
 # ============================================================
 
 async def db_execute(
@@ -102,32 +98,24 @@ async def db_execute(
 
     async with _db_pool.connection() as conn:
 
-        async with conn.cursor() as cursor:
+        async with conn.transaction():
 
-            await cursor.execute(
-                query,
-                params
-            )
+            async with conn.cursor() as cursor:
 
-            if fetch:
+                await cursor.execute(
+                    query,
+                    params
+                )
 
-                result = await cursor.fetchone()
+                if fetch:
 
-                await conn.commit()
+                    return await cursor.fetchone()
 
-                return result
+                if fetchall:
 
-            if fetchall:
+                    return await cursor.fetchall()
 
-                result = await cursor.fetchall()
-
-                await conn.commit()
-
-                return result
-
-            await conn.commit()
-
-            return None
+                return None
 
 
 # ============================================================
@@ -152,10 +140,20 @@ async def init_db():
 
     await _db_pool.open()
 
-    await db_execute(
+    # ========================================================
+    # TEST DE CONEXIÓN
+    # ========================================================
+
+    result = await db_execute(
         "SELECT 1",
         fetch=True
     )
+
+    if result != (1,):
+
+        raise RuntimeError(
+            "La conexión con Neon no respondió correctamente"
+        )
 
     print(
         "[SHOP][DB] Conectado a Neon",
@@ -163,37 +161,126 @@ async def init_db():
     )
 
     # ========================================================
-    # PRODUCTOS
+    # ACCOUNTS
     # ========================================================
 
-    await db_execute("""
+    await db_execute(
+        """
+        CREATE TABLE IF NOT EXISTS accounts (
+
+            guild_id BIGINT NOT NULL,
+
+            user_id BIGINT NOT NULL,
+
+            balance NUMERIC(20, 2)
+                NOT NULL
+                DEFAULT 0
+                CHECK (balance >= 0),
+
+            created_at TIMESTAMPTZ
+                NOT NULL
+                DEFAULT NOW(),
+
+            updated_at TIMESTAMPTZ
+                NOT NULL
+                DEFAULT NOW(),
+
+            PRIMARY KEY (
+                guild_id,
+                user_id
+            )
+        )
+        """
+    )
+
+    print(
+        "[SHOP][DB] Tabla accounts preparada",
+        flush=True
+    )
+
+    # ========================================================
+    # TRANSACTIONS
+    # ========================================================
+
+    await db_execute(
+        """
+        CREATE TABLE IF NOT EXISTS transactions (
+
+            id BIGSERIAL PRIMARY KEY,
+
+            guild_id BIGINT NOT NULL,
+
+            from_user_id BIGINT,
+
+            to_user_id BIGINT,
+
+            amount NUMERIC(20, 2)
+                NOT NULL
+                CHECK (amount >= 0),
+
+            type TEXT
+                NOT NULL,
+
+            description TEXT,
+
+            timestamp TIMESTAMPTZ
+                NOT NULL
+                DEFAULT NOW()
+        )
+        """
+    )
+
+    print(
+        "[SHOP][DB] Tabla transactions preparada",
+        flush=True
+    )
+
+    # ========================================================
+    # SHOP ITEMS
+    # ========================================================
+
+    await db_execute(
+        """
         CREATE TABLE IF NOT EXISTS shop_items (
 
             id BIGSERIAL PRIMARY KEY,
 
-            name TEXT NOT NULL UNIQUE,
+            guild_id BIGINT NOT NULL,
+
+            name TEXT NOT NULL,
 
             description TEXT,
 
             price NUMERIC(20, 2)
-                NOT NULL,
+                NOT NULL
+                DEFAULT 0
+                CHECK (price >= 0),
 
             stock INTEGER
                 NOT NULL
-                DEFAULT -1,
+                DEFAULT -1
+                CHECK (stock >= -1),
 
             role_id BIGINT,
 
             created_at TIMESTAMPTZ
                 NOT NULL
+                DEFAULT NOW()
         )
-    """)
+        """
+    )
+
+    print(
+        "[SHOP][DB] Tabla shop_items preparada",
+        flush=True
+    )
 
     # ========================================================
-    # INVENTARIO
+    # INVENTORY
     # ========================================================
 
-    await db_execute("""
+    await db_execute(
+        """
         CREATE TABLE IF NOT EXISTS inventory (
 
             guild_id BIGINT NOT NULL,
@@ -204,13 +291,16 @@ async def init_db():
 
             quantity INTEGER
                 NOT NULL
-                DEFAULT 0,
+                DEFAULT 0
+                CHECK (quantity >= 0),
 
             created_at TIMESTAMPTZ
-                NOT NULL,
+                NOT NULL
+                DEFAULT NOW(),
 
             updated_at TIMESTAMPTZ
-                NOT NULL,
+                NOT NULL
+                DEFAULT NOW(),
 
             PRIMARY KEY (
                 guild_id,
@@ -219,24 +309,125 @@ async def init_db():
             ),
 
             CONSTRAINT fk_inventory_item
+
                 FOREIGN KEY (item_id)
+
                 REFERENCES shop_items(id)
+
                 ON DELETE CASCADE
         )
-    """)
+        """
+    )
+
+    print(
+        "[SHOP][DB] Tabla inventory preparada",
+        flush=True
+    )
 
     # ========================================================
-    # INDICES
+    # ÍNDICES ACCOUNTS
     # ========================================================
 
-    await db_execute("""
+    await db_execute(
+        """
         CREATE INDEX IF NOT EXISTS
-        idx_shop_items_name
+        idx_accounts_user
 
-        ON shop_items(name)
-    """)
+        ON accounts(
+            guild_id,
+            user_id
+        )
+        """
+    )
 
-    await db_execute("""
+    # ========================================================
+    # ÍNDICES TRANSACTIONS
+    # ========================================================
+
+    await db_execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+        idx_transactions_guild
+
+        ON transactions(
+            guild_id
+        )
+        """
+    )
+
+    await db_execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+        idx_transactions_from_user
+
+        ON transactions(
+            guild_id,
+            from_user_id
+        )
+        """
+    )
+
+    await db_execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+        idx_transactions_to_user
+
+        ON transactions(
+            guild_id,
+            to_user_id
+        )
+        """
+    )
+
+    # ========================================================
+    # ÍNDICES SHOP
+    # ========================================================
+
+    await db_execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+        idx_shop_items_guild
+
+        ON shop_items(
+            guild_id
+        )
+        """
+    )
+
+    await db_execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+        idx_shop_items_guild_name
+
+        ON shop_items(
+            guild_id,
+            LOWER(name)
+        )
+        """
+    )
+
+    # ========================================================
+    # NOMBRE ÚNICO POR SERVIDOR
+    # ========================================================
+
+    await db_execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_shop_items_unique_name
+
+        ON shop_items(
+            guild_id,
+            LOWER(name)
+        )
+        """
+    )
+
+    # ========================================================
+    # ÍNDICES INVENTORY
+    # ========================================================
+
+    await db_execute(
+        """
         CREATE INDEX IF NOT EXISTS
         idx_inventory_user
 
@@ -244,10 +435,11 @@ async def init_db():
             guild_id,
             user_id
         )
-    """)
+        """
+    )
 
     print(
-        "[SHOP][DB] Base de datos lista",
+        "[SHOP][DB] Base de datos completa preparada",
         flush=True
     )
 
@@ -288,8 +480,13 @@ async def shop_command(
 
             FROM shop_items
 
-            ORDER BY price ASC
+            WHERE guild_id = %s
+
+            ORDER BY price ASC, name ASC
             """,
+            (
+                interaction.guild.id,
+            ),
             fetchall=True
         )
 
@@ -385,11 +582,11 @@ async def shop_command(
             flush=True
         )
 
-    except Exception as e:
+    except Exception as error:
 
         print(
             f"[SHOP] ERROR en /shop: "
-            f"{type(e).__name__}: {e}",
+            f"{type(error).__name__}: {error}",
             flush=True
         )
 
@@ -441,6 +638,12 @@ async def buy_command(
     guild_id = interaction.guild.id
     user_id = interaction.user.id
 
+    item_name = None
+    role_id = None
+
+    total_price = Decimal("0")
+    new_balance = Decimal("0")
+
     # ========================================================
     # TRANSACCIÓN COMPLETA
     # ========================================================
@@ -469,13 +672,15 @@ async def buy_command(
 
                         FROM shop_items
 
-                        WHERE LOWER(name) =
-                              LOWER(%s)
+                        WHERE guild_id = %s
+
+                        AND LOWER(name) = LOWER(%s)
 
                         FOR UPDATE
                         """,
                         (
-                            item,
+                            guild_id,
+                            item
                         )
                     )
 
@@ -524,11 +729,13 @@ async def buy_command(
 
                     await cursor.execute(
                         """
-                        SELECT balance
+                        SELECT
+                            balance
 
                         FROM accounts
 
                         WHERE guild_id = %s
+
                         AND user_id = %s
 
                         FOR UPDATE
@@ -543,14 +750,64 @@ async def buy_command(
                         await cursor.fetchone()
                     )
 
+                    # Si no existe, se crea automáticamente.
                     if account is None:
 
-                        await interaction.response.send_message(
-                            "❌ No tienes una cuenta económica.",
-                            ephemeral=True
+                        await cursor.execute(
+                            """
+                            INSERT INTO accounts (
+                                guild_id,
+                                user_id,
+                                balance,
+                                created_at,
+                                updated_at
+                            )
+
+                            VALUES (
+                                %s,
+                                %s,
+                                0,
+                                %s,
+                                %s
+                            )
+
+                            ON CONFLICT (
+                                guild_id,
+                                user_id
+                            )
+
+                            DO NOTHING
+                            """,
+                            (
+                                guild_id,
+                                user_id,
+                                now(),
+                                now()
+                            )
                         )
 
-                        return
+                        await cursor.execute(
+                            """
+                            SELECT
+                                balance
+
+                            FROM accounts
+
+                            WHERE guild_id = %s
+
+                            AND user_id = %s
+
+                            FOR UPDATE
+                            """,
+                            (
+                                guild_id,
+                                user_id
+                            )
+                        )
+
+                        account = (
+                            await cursor.fetchone()
+                        )
 
                     balance = Decimal(
                         str(account[0])
@@ -564,6 +821,10 @@ async def buy_command(
                         Decimal(str(price))
                         * quantity
                     )
+
+                    # ========================================
+                    # DINERO SUFICIENTE
+                    # ========================================
 
                     if balance < total_price:
 
@@ -593,6 +854,7 @@ async def buy_command(
                             updated_at = %s
 
                         WHERE guild_id = %s
+
                         AND user_id = %s
                         """,
                         (
@@ -610,6 +872,7 @@ async def buy_command(
                     await cursor.execute(
                         """
                         INSERT INTO transactions (
+
                             guild_id,
                             from_user_id,
                             to_user_id,
@@ -620,6 +883,7 @@ async def buy_command(
                         )
 
                         VALUES (
+
                             %s,
                             %s,
                             %s,
@@ -668,6 +932,7 @@ async def buy_command(
                     await cursor.execute(
                         """
                         INSERT INTO inventory (
+
                             guild_id,
                             user_id,
                             item_id,
@@ -677,6 +942,7 @@ async def buy_command(
                         )
 
                         VALUES (
+
                             %s,
                             %s,
                             %s,
@@ -708,6 +974,10 @@ async def buy_command(
                             current,
                             current
                         )
+                    )
+
+                    new_balance = (
+                        balance - total_price
                     )
 
         except Exception as error:
@@ -751,15 +1021,21 @@ async def buy_command(
 
             except discord.Forbidden:
 
-                pass
+                print(
+                    f"[SHOP] No se pudo dar el rol {role_id}",
+                    flush=True
+                )
+
+            except discord.HTTPException as error:
+
+                print(
+                    f"[SHOP] Error dando rol: {error}",
+                    flush=True
+                )
 
     # ========================================================
     # RESPUESTA
     # ========================================================
-
-    new_balance = (
-        balance - total_price
-    )
 
     embed = discord.Embed(
         title="🛒 Compra realizada",
@@ -815,7 +1091,6 @@ async def inventory_command(
         return
 
     if user is None:
-
         user = interaction.user
 
     if user.bot:
@@ -840,7 +1115,9 @@ async def inventory_command(
             ON s.id = i.item_id
 
         WHERE i.guild_id = %s
+
         AND i.user_id = %s
+
         AND i.quantity > 0
 
         ORDER BY s.name ASC
@@ -903,11 +1180,26 @@ async def shop_info_command(
     interaction: discord.Interaction
 ):
 
+    if interaction.guild is None:
+
+        await interaction.response.send_message(
+            "❌ Este comando solo funciona en un servidor.",
+            ephemeral=True
+        )
+
+        return
+
     result = await db_execute(
         """
         SELECT COUNT(*)
+
         FROM shop_items
+
+        WHERE guild_id = %s
         """,
+        (
+            interaction.guild.id,
+        ),
         fetch=True
     )
 
@@ -956,7 +1248,7 @@ def is_admin(
 # /SHOP_ADD
 # ============================================================
 
-@discord.app_commands.default_permissions(
+@app_commands.default_permissions(
     administrator=True
 )
 async def shop_add_command(
@@ -990,6 +1282,17 @@ async def shop_add_command(
 
         await interaction.response.send_message(
             "❌ El stock debe ser `-1` o un número positivo.",
+            ephemeral=True
+        )
+
+        return
+
+    name = name.strip()
+
+    if not name:
+
+        await interaction.response.send_message(
+            "❌ El nombre no puede estar vacío.",
             ephemeral=True
         )
 
@@ -1032,6 +1335,8 @@ async def shop_add_command(
         await db_execute(
             """
             INSERT INTO shop_items (
+
+                guild_id,
                 name,
                 description,
                 price,
@@ -1041,6 +1346,8 @@ async def shop_add_command(
             )
 
             VALUES (
+
+                %s,
                 %s,
                 %s,
                 %s,
@@ -1050,6 +1357,7 @@ async def shop_add_command(
             )
             """,
             (
+                interaction.guild.id,
                 name,
                 description,
                 price,
@@ -1061,16 +1369,32 @@ async def shop_add_command(
 
     except Exception as error:
 
-        if "duplicate key" in str(error).lower():
+        error_text = str(error).lower()
+
+        if (
+            "duplicate key" in error_text
+            or "unique constraint" in error_text
+        ):
 
             await interaction.response.send_message(
-                f"❌ Ya existe **{name}**.",
+                f"❌ Ya existe **{name}** en esta tienda.",
                 ephemeral=True
             )
 
             return
 
-        raise
+        print(
+            f"[SHOP] Error creando producto: "
+            f"{type(error).__name__}: {error}",
+            flush=True
+        )
+
+        await interaction.response.send_message(
+            "❌ No se pudo crear el producto.",
+            ephemeral=True
+        )
+
+        return
 
     await interaction.response.send_message(
         f"✅ Producto **{name}** creado.\n"
@@ -1082,7 +1406,7 @@ async def shop_add_command(
 # /SHOP_REMOVE
 # ============================================================
 
-@discord.app_commands.default_permissions(
+@app_commands.default_permissions(
     administrator=True
 )
 async def shop_remove_command(
@@ -1107,11 +1431,13 @@ async def shop_remove_command(
 
         FROM shop_items
 
-        WHERE LOWER(name) =
-              LOWER(%s)
+        WHERE guild_id = %s
+
+        AND LOWER(name) = LOWER(%s)
         """,
         (
-            name,
+            interaction.guild.id,
+            name
         ),
         fetch=True
     )
@@ -1132,9 +1458,12 @@ async def shop_remove_command(
         DELETE FROM shop_items
 
         WHERE id = %s
+
+        AND guild_id = %s
         """,
         (
             item_id,
+            interaction.guild.id
         )
     )
 
@@ -1147,7 +1476,7 @@ async def shop_remove_command(
 # /SHOP_EDIT
 # ============================================================
 
-@discord.app_commands.default_permissions(
+@app_commands.default_permissions(
     administrator=True
 )
 async def shop_edit_command(
@@ -1231,7 +1560,9 @@ async def shop_edit_command(
             "price = %s"
         )
 
-        values.append(price)
+        values.append(
+            price
+        )
 
     if stock is not None:
 
@@ -1239,7 +1570,9 @@ async def shop_edit_command(
             "stock = %s"
         )
 
-        values.append(stock)
+        values.append(
+            stock
+        )
 
     if description is not None:
 
@@ -1247,7 +1580,9 @@ async def shop_edit_command(
             "description = %s"
         )
 
-        values.append(description)
+        values.append(
+            description
+        )
 
     if role_id is not None:
 
@@ -1274,11 +1609,13 @@ async def shop_edit_command(
 
         FROM shop_items
 
-        WHERE LOWER(name) =
-              LOWER(%s)
+        WHERE guild_id = %s
+
+        AND LOWER(name) = LOWER(%s)
         """,
         (
-            name,
+            interaction.guild.id,
+            name
         ),
         fetch=True
     )
@@ -1294,8 +1631,11 @@ async def shop_edit_command(
 
     item_id = item[0]
 
-    values.append(
-        item_id
+    values.extend(
+        [
+            item_id,
+            interaction.guild.id
+        ]
     )
 
     query = f"""
@@ -1304,15 +1644,60 @@ async def shop_edit_command(
         SET {", ".join(updates)}
 
         WHERE id = %s
+
+        AND guild_id = %s
     """
 
-    await db_execute(
-        query,
-        values
-    )
+    try:
+
+        await db_execute(
+            query,
+            values
+        )
+
+    except Exception as error:
+
+        print(
+            f"[SHOP] Error editando producto: "
+            f"{type(error).__name__}: {error}",
+            flush=True
+        )
+
+        await interaction.response.send_message(
+            "❌ No se pudo actualizar el producto.",
+            ephemeral=True
+        )
+
+        return
 
     await interaction.response.send_message(
         f"✅ Producto **{name}** actualizado."
+    )
+
+
+# ============================================================
+# CLOSE DATABASE
+# ============================================================
+
+async def close_shop_db():
+
+    global _db_pool
+
+    if _db_pool is None:
+        return
+
+    print(
+        "[SHOP][DB] Cerrando pool de Neon...",
+        flush=True
+    )
+
+    await _db_pool.close()
+
+    _db_pool = None
+
+    print(
+        "[SHOP][DB] Pool cerrado",
+        flush=True
     )
 
 
@@ -1325,7 +1710,6 @@ async def shop_on_ready():
     global _initialized
 
     if _initialized:
-
         return
 
     print(
@@ -1333,14 +1717,26 @@ async def shop_on_ready():
         flush=True
     )
 
-    await init_db()
+    try:
 
-    _initialized = True
+        await init_db()
 
-    print(
-        "[SHOP] Módulo listo",
-        flush=True
-    )
+        _initialized = True
+
+        print(
+            "[SHOP] Módulo listo",
+            flush=True
+        )
+
+    except Exception as error:
+
+        print(
+            f"[SHOP] ERROR inicializando DB: "
+            f"{type(error).__name__}: {error}",
+            flush=True
+        )
+
+        raise
 
 
 # ============================================================
@@ -1372,7 +1768,7 @@ def setup_shop(client):
     # ========================================================
 
     client.tree.add_command(
-        discord.app_commands.Command(
+        app_commands.Command(
             name="shop",
             description=(
                 "Muestra los productos de la tienda."
@@ -1387,7 +1783,7 @@ def setup_shop(client):
     # ========================================================
 
     client.tree.add_command(
-        discord.app_commands.Command(
+        app_commands.Command(
             name="buy",
             description=(
                 "Compra un producto de la tienda."
@@ -1402,7 +1798,7 @@ def setup_shop(client):
     # ========================================================
 
     client.tree.add_command(
-        discord.app_commands.Command(
+        app_commands.Command(
             name="inventory",
             description=(
                 "Muestra tu inventario."
@@ -1417,7 +1813,7 @@ def setup_shop(client):
     # ========================================================
 
     client.tree.add_command(
-        discord.app_commands.Command(
+        app_commands.Command(
             name="shopinfo",
             description=(
                 "Muestra información de la tienda."
@@ -1432,7 +1828,7 @@ def setup_shop(client):
     # ========================================================
 
     client.tree.add_command(
-        discord.app_commands.Command(
+        app_commands.Command(
             name="shop_add",
             description=(
                 "Crea un producto en la tienda."
@@ -1447,7 +1843,7 @@ def setup_shop(client):
     # ========================================================
 
     client.tree.add_command(
-        discord.app_commands.Command(
+        app_commands.Command(
             name="shop_remove",
             description=(
                 "Elimina un producto de la tienda."
@@ -1462,7 +1858,7 @@ def setup_shop(client):
     # ========================================================
 
     client.tree.add_command(
-        discord.app_commands.Command(
+        app_commands.Command(
             name="shop_edit",
             description=(
                 "Edita un producto de la tienda."
