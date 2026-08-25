@@ -96,20 +96,17 @@ def format_duration(seconds):
 
 def sqlite_to_postgres(query):
     """
-    Convierte placeholders:
+    Convierte placeholders estilo SQLite:
 
         ?
         ?, ?
         ?, ?, ?
 
-    en:
+    a placeholders de PostgreSQL/psycopg:
 
         %s
         %s, %s
         %s, %s, %s
-
-    Esto permite mantener las consultas originales
-    sin tener que reescribir todos los placeholders.
     """
 
     return query.replace("?", "%s")
@@ -145,14 +142,22 @@ async def db_execute(
             )
 
             if fetch:
+                result = await cursor.fetchone()
 
-                return await cursor.fetchone()
+                await conn.commit()
+
+                return result
 
             if fetchall:
+                result = await cursor.fetchall()
 
-                return await cursor.fetchall()
+                await conn.commit()
 
-            return None
+                return result
+
+        await conn.commit()
+
+        return None
 
 
 # ============================================================
@@ -168,246 +173,371 @@ async def init_db():
         flush=True
     )
 
-    _pool = AsyncConnectionPool(
-        conninfo=DATABASE_URL,
-        min_size=1,
-        max_size=5,
-        open=False
-    )
+    try:
 
-    await _pool.open()
+        _pool = AsyncConnectionPool(
+            conninfo=DATABASE_URL,
+            min_size=1,
+            max_size=5,
+            open=False
+        )
 
-    print(
-        "[STATS][DB] Pool de conexiones creado",
-        flush=True
-    )
+        await _pool.open()
 
-    async with _pool.connection() as conn:
+        print(
+            "[STATS][DB] Pool de conexiones creado",
+            flush=True
+        )
 
-        async with conn.cursor() as db:
+        # ----------------------------------------------------
+        # COMPROBAR CONEXIÓN
+        # ----------------------------------------------------
 
-            # ------------------------------------------------
-            # USUARIOS
-            # ------------------------------------------------
+        async with _pool.connection() as conn:
 
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT NOT NULL,
+            async with conn.cursor() as db:
 
-                    username TEXT,
-                    display_name TEXT,
+                await db.execute("""
+                    SELECT
+                        current_database(),
+                        current_schema()
+                """)
 
-                    created_at TEXT,
-                    joined_at TEXT,
+                database_info = await db.fetchone()
 
-                    first_seen TEXT,
-                    last_seen TEXT,
-
-                    messages BIGINT DEFAULT 0,
-                    characters BIGINT DEFAULT 0,
-
-                    attachments BIGINT DEFAULT 0,
-                    links BIGINT DEFAULT 0,
-
-                    reactions_added BIGINT DEFAULT 0,
-
-                    messages_deleted BIGINT DEFAULT 0,
-                    messages_edited BIGINT DEFAULT 0,
-
-                    typing_events BIGINT DEFAULT 0,
-
-                    voice_sessions BIGINT DEFAULT 0,
-                    voice_seconds BIGINT DEFAULT 0,
-
-                    online_seconds BIGINT DEFAULT 0,
-                    idle_seconds BIGINT DEFAULT 0,
-
-                    last_voice_channel_id BIGINT,
-                    last_text_channel_id BIGINT,
-
-                    PRIMARY KEY (guild_id, user_id)
+                print(
+                    "[STATS][DB] Conectado correctamente",
+                    flush=True
                 )
-            """)
 
-            # ------------------------------------------------
-            # MENSAJES
-            # ------------------------------------------------
-
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS messages (
-                    id BIGSERIAL PRIMARY KEY,
-
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT NOT NULL,
-                    channel_id BIGINT NOT NULL,
-
-                    timestamp TEXT NOT NULL,
-
-                    characters BIGINT DEFAULT 0,
-                    attachments BIGINT DEFAULT 0,
-                    links BIGINT DEFAULT 0
+                print(
+                    f"[STATS][DB] Database: "
+                    f"{database_info[0]}",
+                    flush=True
                 )
-            """)
 
-            # ------------------------------------------------
-            # EVENTOS DE MIEMBROS
-            # ------------------------------------------------
-
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS member_events (
-                    id BIGSERIAL PRIMARY KEY,
-
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT NOT NULL,
-
-                    event TEXT NOT NULL,
-
-                    timestamp TEXT NOT NULL
+                print(
+                    f"[STATS][DB] Schema: "
+                    f"{database_info[1]}",
+                    flush=True
                 )
-            """)
 
-            # ------------------------------------------------
-            # VOZ
-            # ------------------------------------------------
+        # ----------------------------------------------------
+        # CREAR TABLAS
+        # ----------------------------------------------------
 
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS voice_sessions (
-                    id BIGSERIAL PRIMARY KEY,
+        async with _pool.connection() as conn:
 
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT NOT NULL,
+            async with conn.cursor() as db:
 
-                    channel_id BIGINT NOT NULL,
+                # ====================================================
+                # USUARIOS
+                # ====================================================
 
-                    joined_at TEXT NOT NULL,
-                    left_at TEXT,
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT NOT NULL,
 
-                    duration_seconds BIGINT DEFAULT 0
-                )
-            """)
+                        username TEXT,
+                        display_name TEXT,
 
-            # ------------------------------------------------
-            # PRESENCIA
-            # ------------------------------------------------
+                        created_at TEXT,
+                        joined_at TEXT,
 
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS presence_sessions (
-                    id BIGSERIAL PRIMARY KEY,
+                        first_seen TEXT,
+                        last_seen TEXT,
 
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT NOT NULL,
+                        messages BIGINT DEFAULT 0,
+                        characters BIGINT DEFAULT 0,
 
-                    status TEXT NOT NULL,
+                        attachments BIGINT DEFAULT 0,
+                        links BIGINT DEFAULT 0,
 
-                    started_at TEXT NOT NULL,
-                    ended_at TEXT,
+                        reactions_added BIGINT DEFAULT 0,
 
-                    duration_seconds BIGINT DEFAULT 0
-                )
-            """)
+                        messages_deleted BIGINT DEFAULT 0,
+                        messages_edited BIGINT DEFAULT 0,
 
-            # ------------------------------------------------
-            # EVENTOS DE PRESENCIA
-            # ------------------------------------------------
+                        typing_events BIGINT DEFAULT 0,
 
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS presence_events (
-                    id BIGSERIAL PRIMARY KEY,
+                        voice_sessions BIGINT DEFAULT 0,
+                        voice_seconds BIGINT DEFAULT 0,
 
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT NOT NULL,
+                        online_seconds BIGINT DEFAULT 0,
+                        idle_seconds BIGINT DEFAULT 0,
 
-                    status TEXT NOT NULL,
+                        last_voice_channel_id BIGINT,
+                        last_text_channel_id BIGINT,
 
-                    timestamp TEXT NOT NULL
-                )
-            """)
+                        PRIMARY KEY (guild_id, user_id)
+                    )
+                """)
 
-            # ------------------------------------------------
-            # REACCIONES
-            # ------------------------------------------------
+                # ====================================================
+                # MENSAJES
+                # ====================================================
 
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS reactions (
-                    id BIGSERIAL PRIMARY KEY,
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id BIGSERIAL PRIMARY KEY,
 
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT NOT NULL,
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT NOT NULL,
+                        channel_id BIGINT NOT NULL,
 
-                    channel_id BIGINT,
-                    message_id BIGINT,
+                        timestamp TEXT NOT NULL,
 
-                    emoji TEXT,
+                        characters BIGINT DEFAULT 0,
+                        attachments BIGINT DEFAULT 0,
+                        links BIGINT DEFAULT 0
+                    )
+                """)
 
-                    timestamp TEXT NOT NULL
-                )
-            """)
+                # ====================================================
+                # EVENTOS DE MIEMBROS
+                # ====================================================
 
-            # ------------------------------------------------
-            # EDICIONES
-            # ------------------------------------------------
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS member_events (
+                        id BIGSERIAL PRIMARY KEY,
 
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS message_edits (
-                    id BIGSERIAL PRIMARY KEY,
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT NOT NULL,
 
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT NOT NULL,
+                        event TEXT NOT NULL,
 
-                    channel_id BIGINT,
-                    message_id BIGINT,
+                        timestamp TEXT NOT NULL
+                    )
+                """)
 
-                    timestamp TEXT NOT NULL
-                )
-            """)
+                # ====================================================
+                # VOZ
+                # ====================================================
 
-            # ------------------------------------------------
-            # BORRADOS
-            # ------------------------------------------------
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS voice_sessions (
+                        id BIGSERIAL PRIMARY KEY,
 
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS message_deletions (
-                    id BIGSERIAL PRIMARY KEY,
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT NOT NULL,
 
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT,
+                        channel_id BIGINT NOT NULL,
 
-                    channel_id BIGINT,
-                    message_id BIGINT,
+                        joined_at TEXT NOT NULL,
+                        left_at TEXT,
 
-                    timestamp TEXT NOT NULL
-                )
-            """)
+                        duration_seconds BIGINT DEFAULT 0
+                    )
+                """)
 
-            # ------------------------------------------------
-            # ÍNDICES
-            # ------------------------------------------------
+                # ====================================================
+                # PRESENCIA
+                # ====================================================
 
-            await db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_messages_guild_user
-                ON messages(guild_id, user_id)
-            """)
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS presence_sessions (
+                        id BIGSERIAL PRIMARY KEY,
 
-            await db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_messages_timestamp
-                ON messages(timestamp)
-            """)
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT NOT NULL,
 
-            await db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_voice_guild_user
-                ON voice_sessions(guild_id, user_id)
-            """)
+                        status TEXT NOT NULL,
 
-            await db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_presence_guild_user
-                ON presence_sessions(guild_id, user_id)
-            """)
+                        started_at TEXT NOT NULL,
+                        ended_at TEXT,
 
-    print(
-        "[STATS][DB] Base de datos Neon lista",
-        flush=True
-    )
+                        duration_seconds BIGINT DEFAULT 0
+                    )
+                """)
+
+                # ====================================================
+                # EVENTOS DE PRESENCIA
+                # ====================================================
+
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS presence_events (
+                        id BIGSERIAL PRIMARY KEY,
+
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT NOT NULL,
+
+                        status TEXT NOT NULL,
+
+                        timestamp TEXT NOT NULL
+                    )
+                """)
+
+                # ====================================================
+                # REACCIONES
+                # ====================================================
+
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS reactions (
+                        id BIGSERIAL PRIMARY KEY,
+
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT NOT NULL,
+
+                        channel_id BIGINT,
+                        message_id BIGINT,
+
+                        emoji TEXT,
+
+                        timestamp TEXT NOT NULL
+                    )
+                """)
+
+                # ====================================================
+                # EDICIONES
+                # ====================================================
+
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS message_edits (
+                        id BIGSERIAL PRIMARY KEY,
+
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT NOT NULL,
+
+                        channel_id BIGINT,
+                        message_id BIGINT,
+
+                        timestamp TEXT NOT NULL
+                    )
+                """)
+
+                # ====================================================
+                # BORRADOS
+                # ====================================================
+
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS message_deletions (
+                        id BIGSERIAL PRIMARY KEY,
+
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT,
+
+                        channel_id BIGINT,
+                        message_id BIGINT,
+
+                        timestamp TEXT NOT NULL
+                    )
+                """)
+
+                # ====================================================
+                # ÍNDICES
+                # ====================================================
+
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_messages_guild_user
+                    ON messages(guild_id, user_id)
+                """)
+
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_messages_timestamp
+                    ON messages(timestamp)
+                """)
+
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_voice_guild_user
+                    ON voice_sessions(guild_id, user_id)
+                """)
+
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_presence_guild_user
+                    ON presence_sessions(guild_id, user_id)
+                """)
+
+            # ========================================================
+            # COMMIT
+            # ========================================================
+
+            await conn.commit()
+
+            print(
+                "[STATS][DB] Tablas creadas/verificadas",
+                flush=True
+            )
+
+        # ----------------------------------------------------
+        # COMPROBAR TABLAS
+        # ----------------------------------------------------
+
+        async with _pool.connection() as conn:
+
+            async with conn.cursor() as db:
+
+                await db.execute("""
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                    AND table_type = 'BASE TABLE'
+                    ORDER BY table_name
+                """)
+
+                tables = await db.fetchall()
+
+        table_names = [
+            table[0]
+            for table in tables
+        ]
+
+        print(
+            "[STATS][DB] TABLAS EN NEON:",
+            table_names,
+            flush=True
+        )
+
+        expected_tables = {
+            "users",
+            "messages",
+            "member_events",
+            "voice_sessions",
+            "presence_sessions",
+            "presence_events",
+            "reactions",
+            "message_edits",
+            "message_deletions"
+        }
+
+        missing_tables = (
+            expected_tables -
+            set(table_names)
+        )
+
+        if missing_tables:
+
+            print(
+                "[STATS][DB] ⚠️ FALTAN TABLAS:",
+                sorted(missing_tables),
+                flush=True
+            )
+
+        else:
+
+            print(
+                "[STATS][DB] ✅ TODAS LAS TABLAS EXISTEN",
+                flush=True
+            )
+
+        print(
+            "[STATS][DB] Base de datos Neon lista",
+            flush=True
+        )
+
+    except Exception as e:
+
+        print(
+            "[STATS][DB] ❌ ERROR:",
+            flush=True
+        )
+
+        print(
+            f"[STATS][DB] {type(e).__name__}: {e}",
+            flush=True
+        )
+
+        raise
 
 
 # ============================================================
@@ -443,7 +573,7 @@ async def ensure_user(member):
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 
-        ON CONFLICT(guild_id, user_id)
+        ON CONFLICT (guild_id, user_id)
         DO UPDATE SET
             username = EXCLUDED.username,
             display_name = EXCLUDED.display_name,
@@ -529,116 +659,126 @@ async def stats_on_ready():
         flush=True
     )
 
-    await init_db()
+    try:
 
-    guild = _client.get_guild(GUILD_ID)
+        await init_db()
 
-    if guild is None:
+        guild = _client.get_guild(GUILD_ID)
 
-        print(
-            f"[STATS] ERROR: "
-            f"No se encontró el servidor {GUILD_ID}",
-            flush=True
-        )
-
-        return
-
-    print(
-        f"[STATS] Sincronizando "
-        f"{len(guild.members)} usuarios...",
-        flush=True
-    )
-
-    for member in guild.members:
-
-        if member.bot:
-            continue
-
-        try:
-
-            await ensure_user(member)
-
-        except Exception as e:
+        if guild is None:
 
             print(
-                f"[STATS] Error usuario "
-                f"{member.id}: {e}",
+                f"[STATS] ERROR: "
+                f"No se encontró el servidor {GUILD_ID}",
                 flush=True
             )
 
-    # --------------------------------------------------------
-    # RECUPERAR SESIONES DE VOZ
-    # --------------------------------------------------------
+            return
 
-    for voice_channel in guild.voice_channels:
+        print(
+            f"[STATS] Sincronizando "
+            f"{len(guild.members)} usuarios...",
+            flush=True
+        )
 
-        for member in voice_channel.members:
+        for member in guild.members:
 
             if member.bot:
                 continue
 
-            existing = await db_execute("""
-                SELECT id
-                FROM voice_sessions
-                WHERE guild_id = ?
-                AND user_id = ?
-                AND left_at IS NULL
-                ORDER BY id DESC
-                LIMIT 1
-            """, (
-                guild.id,
-                member.id
-            ), fetch=True)
+            try:
 
-            if not existing:
+                await ensure_user(member)
 
-                await db_execute("""
-                    INSERT INTO voice_sessions (
-                        guild_id,
-                        user_id,
-                        channel_id,
-                        joined_at
-                    )
-                    VALUES (?, ?, ?, ?)
-                """, (
-                    guild.id,
-                    member.id,
-                    voice_channel.id,
-                    iso()
-                ))
-
-                await db_execute("""
-                    UPDATE users
-                    SET
-                        voice_sessions =
-                            voice_sessions + 1,
-
-                        last_voice_channel_id = ?,
-                        last_seen = ?
-
-                    WHERE guild_id = ?
-                    AND user_id = ?
-                """, (
-                    voice_channel.id,
-                    iso(),
-                    guild.id,
-                    member.id
-                ))
+            except Exception as e:
 
                 print(
-                    f"[STATS][VOICE] "
-                    f"Sesión recuperada: "
-                    f"{member} -> "
-                    f"{voice_channel.name}",
+                    f"[STATS] Error usuario "
+                    f"{member.id}: {e}",
                     flush=True
                 )
 
-    _initialized = True
+        # --------------------------------------------------------
+        # RECUPERAR SESIONES DE VOZ
+        # --------------------------------------------------------
 
-    print(
-        "[STATS] Módulo listo",
-        flush=True
-    )
+        for voice_channel in guild.voice_channels:
+
+            for member in voice_channel.members:
+
+                if member.bot:
+                    continue
+
+                existing = await db_execute("""
+                    SELECT id
+                    FROM voice_sessions
+                    WHERE guild_id = ?
+                    AND user_id = ?
+                    AND left_at IS NULL
+                    ORDER BY id DESC
+                    LIMIT 1
+                """, (
+                    guild.id,
+                    member.id
+                ), fetch=True)
+
+                if not existing:
+
+                    await db_execute("""
+                        INSERT INTO voice_sessions (
+                            guild_id,
+                            user_id,
+                            channel_id,
+                            joined_at
+                        )
+                        VALUES (?, ?, ?, ?)
+                    """, (
+                        guild.id,
+                        member.id,
+                        voice_channel.id,
+                        iso()
+                    ))
+
+                    await db_execute("""
+                        UPDATE users
+                        SET
+                            voice_sessions =
+                                voice_sessions + 1,
+
+                            last_voice_channel_id = ?,
+                            last_seen = ?
+
+                        WHERE guild_id = ?
+                        AND user_id = ?
+                    """, (
+                        voice_channel.id,
+                        iso(),
+                        guild.id,
+                        member.id
+                    ))
+
+                    print(
+                        f"[STATS][VOICE] "
+                        f"Sesión recuperada: "
+                        f"{member} -> "
+                        f"{voice_channel.name}",
+                        flush=True
+                    )
+
+        _initialized = True
+
+        print(
+            "[STATS] Módulo listo",
+            flush=True
+        )
+
+    except Exception as e:
+
+        print(
+            f"[STATS] ❌ ERROR INICIALIZANDO: "
+            f"{type(e).__name__}: {e}",
+            flush=True
+        )
 
 
 # ============================================================
