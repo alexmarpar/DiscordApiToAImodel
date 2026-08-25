@@ -11,11 +11,11 @@ from psycopg_pool import AsyncConnectionPool
 # CONFIG
 # ============================================================
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_ECONOMY_URL")
 
 if not DATABASE_URL:
     raise RuntimeError(
-        "DATABASE_URL no está definido"
+        "DATABASE_ECONOMY_URL no está definido"
     )
 
 
